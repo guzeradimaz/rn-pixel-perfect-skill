@@ -50,59 +50,72 @@ getShadow  → cross-platform shadows from src/theme/shadows.ts
 
 ---
 
-## FIGMA API RATE LIMIT STRATEGY
+## FIGMA MCP SERVER: figma-mcp-go
 
-> **CRITICAL: Read this before making ANY Figma MCP call.**
-> Figma API has strict rate limits. Tier 1 endpoints (file/node data) allow only
-> **10–20 requests per minute** for Dev/Full seats. View/Collab seats get **6 requests per MONTH**.
-> Hitting the limit returns HTTP 429 and blocks you for the duration of `Retry-After`.
+> This skill uses `@vkhanhqui/figma-mcp-go` — a Figma MCP server that reads data
+> directly via a **Figma Desktop plugin bridge**, NOT through the REST API.
+> **No API key needed. No rate limits.** Calls are free and unlimited.
 
-### Golden rule: EXTRACT MAXIMUM DATA PER CALL
+### Prerequisites
+1. **Figma Desktop app** must be running (not web version)
+2. **figma-mcp-go plugin** installed and active in the open Figma file:
+   - Plugins → Development → Import plugin from manifest
+   - Select `manifest.json` from the plugin.zip
+   - Run the plugin inside the target Figma file
+3. MCP server configured in `~/.claude/settings.json` (see Step 0.0)
 
-Every Figma MCP call is expensive. Treat each call as if you only have 5 total for the entire screen.
+### Available tools
 
-### Request budget per screen
+| Category | Tool | Description |
+|----------|------|-------------|
+| **Primary** | `get_design_context` | Depth-limited tree — layout, colors, typography, spacing |
+| **Primary** | `get_screenshot` | Base64 image export of any node |
+| **Tokens** | `get_variable_defs` | Variable collections and values |
+| **Extra** | `get_document` | Full current page tree |
+| **Extra** | `get_metadata` | File name, pages, current page |
+| **Extra** | `get_node` | Single node by ID |
+| **Extra** | `get_nodes_info` | Multiple nodes by ID |
+| **Extra** | `get_selection` | Currently selected nodes in Figma |
+| **Extra** | `scan_text_nodes` | All text nodes in a subtree |
+| **Extra** | `scan_nodes_by_types` | Nodes matching given type list |
+| **Extra** | `get_styles` | Paint, text, effect, and grid styles |
+| **Extra** | `get_local_components` | All components in the file |
+| **Extra** | `get_annotations` | Dev-mode annotations |
+| **Export** | `save_screenshots` | Export images to disk (no API call) |
 
-| Task | Max calls | Tools |
-|------|-----------|-------|
-| Simple component | 1–2 | `get_design_context` (+ `get_screenshot` if needed) |
-| Full screen | 3–5 | `get_design_context` root + 1-2 child sections + `get_screenshot` |
-| Screen + theme sync | 4–6 | above + `get_variable_defs` |
+### Call strategy (no rate limits, but be efficient)
 
-**NEVER exceed 6 Figma MCP calls for a single screen implementation.**
+There are **no rate limits**, but extract maximum data per call to reduce context window noise.
 
-### Rules
+1. **ONE call to `get_design_context` for the root node FIRST.** Extract everything: layout, colors, fonts, spacing, children hierarchy. Write the extraction map immediately.
+2. **Fetch child nodes freely if data is incomplete.** Unlike API-based servers, additional calls are free. But avoid unnecessary calls that bloat your context.
+3. **`get_screenshot` — call for root node + any section needed for Phase 5.** Free to call multiple times.
+4. **`get_variable_defs` — call when you need design tokens.** No cost, but only call if colors/typography reference variable names.
+5. **Use `get_selection` when user says "верстай выделенное" / "implement selected".** Gets the currently selected nodes in Figma without needing a node ID.
+6. **NEVER re-fetch data you already have.** The extraction map from Step 1.2 is your cache. Even without rate limits, re-fetching wastes context.
+7. **Batch your planning.** Before any MCP call, plan what data you need. Make the call and extract all answers at once.
 
-1. **ONE call to `get_design_context` for the root node FIRST.** Extract EVERYTHING from this single response — layout, colors, typography, spacing, children hierarchy. Write it all down in the extraction map immediately.
-2. **Do NOT call child nodes unless data is provably missing.** If the root response contains child data (even partial), use it. Only fetch a child node if its critical values (colors, sizes, typography) are completely absent from the root response.
-3. **Do NOT call `get_variable_defs` by default.** Only call it if the user explicitly asks to sync Figma Variables/design tokens, OR if colors/typography in the root response reference variable names instead of raw values.
-4. **Do NOT call `get_metadata` by default.** Only call it if the root `get_design_context` response is severely truncated (missing entire sections of the screen).
-5. **`get_screenshot` — call ONCE for the root node.** Do not take screenshots of individual components.
-6. **NEVER re-fetch data you already have.** The extraction map from Step 1.2 is your cache. If Phase 4 validation finds a missing value, check the original MCP response text first. Only re-call MCP as absolute last resort.
-7. **If you get a 429 error:** STOP all Figma calls immediately. Tell the user: "Figma API rate limit hit. Wait N seconds (from Retry-After header) before continuing." Do NOT retry automatically — wait for user confirmation.
-8. **Batch your planning.** Before making any MCP call, plan exactly what data you need from it. Write down the questions you need answered. Then make the call and extract ALL answers at once.
-
-### Call sequence (optimized)
+### Call sequence
 
 ```
 CALL 1: get_design_context(fileKey, rootNodeId)
         → Extract EVERYTHING: layout, colors, fonts, spacing, children
         → Fill the complete extraction map
-        → Decide: is any section truly missing?
+        → Decide: is any section missing?
 
-CALL 2 (only if needed): get_design_context(fileKey, childNodeId)
-        → Only for a section that was truncated/missing in Call 1
+CALL 2 (if needed): get_design_context(fileKey, childNodeId)
+        → For sections truncated/missing in Call 1
         → Merge into extraction map
 
-CALL 3 (only if needed): get_screenshot(fileKey, rootNodeId)
-        → For Phase 4 visual validation
-        → Save once, reuse forever
+CALL 3: get_screenshot(fileKey, rootNodeId)
+        → For Phase 5 visual validation
+        → Save locally, reuse forever
 
-CALL 4 (only if explicitly requested): get_variable_defs(fileKey)
-        → For theme token sync only
+CALL 4 (if needed): get_variable_defs(fileKey)
+        → For theme token sync
 ```
 
-**Typical screen: 2-3 calls total. Complex screen: 4-5 max.**
+**Typical screen: 3-4 calls. No hard limit, but stay efficient.**
 
 ---
 
@@ -112,21 +125,33 @@ CALL 4 (only if explicitly requested): get_variable_defs(fileKey)
 
 ### Step 0.0 — Check Figma MCP availability
 Before calling any Figma tools, verify the MCP is available:
-1. Try calling any Figma MCP tool (e.g., `get_design_context` with a test fileKey)
+1. Try calling any Figma MCP tool (e.g., `get_metadata`)
 2. If the tool is NOT available (error "tool not found" or similar):
-   - Tell the user: "Figma MCP не подключён. Запусти `bash scripts/setup.sh` из папки скилла или добавь вручную в `~/.claude/settings.json`:"
+   - Tell the user: "Figma MCP не подключён. Нужен `figma-mcp-go`:"
+   a. Добавь в `~/.claude/settings.json` (с proxy для авто-перезапуска):
    ```json
    "mcpServers": {
-     "figma": {
-       "command": "npx",
-       "args": ["-y", "figma-developer-mcp"],
-       "env": { "FIGMA_ACCESS_TOKEN": "YOUR_TOKEN" }
+     "figma-mcp-go": {
+       "command": "node",
+       "args": ["~/.claude/scripts/figma-mcp-proxy.js"]
      }
    }
    ```
-   - Token получить: Figma → Settings → Personal Access Tokens → Generate
-   - After adding, restart Claude Code for MCP to load
-3. If the MCP IS available — proceed to Step 0.0.1
+   Установить proxy: `cp scripts/figma-mcp-proxy.js ~/.claude/scripts/`
+
+   b. Или напрямую (без proxy):
+   ```json
+   "figma-mcp-go": {
+     "command": "npx",
+     "args": ["-y", "@vkhanhqui/figma-mcp-go"]
+   }
+   ```
+   c. **Обязательно:** открой Figma Desktop → Plugins → Development → Import plugin from manifest → запусти плагин figma-mcp-go в файле
+   d. Restart Claude Code for MCP to load
+3. If tool responds but with **"plugin not connected"** or empty data:
+   - Figma Desktop не запущена или плагин не активен
+   - Tell user: "Открой Figma Desktop и запусти плагин figma-mcp-go в нужном файле"
+4. If the MCP IS available and returns data — proceed to Step 0.0.1
 
 ### Step 0.0.1 — Check iOS Simulator MCP availability
 Check if the `mobile-mcp` (or `ios-simulator`) MCP is available:
@@ -144,6 +169,42 @@ Check if the `mobile-mcp` (or `ios-simulator`) MCP is available:
    - Перед использованием загрузи симулятор: `xcrun simctl boot "iPhone 16"`
 3. If available — set `simulatorMCP = true` (enables Phase 5 visual loop)
 4. **Phase 5 is MANDATORY when simulator MCP is available.** The implementation is NOT complete until visual validation passes.
+
+### Step 0.0.2 — MCP Server Resilience (applies to ALL phases)
+
+> `figma-mcp-go` is a local stdio process that may crash mid-session.
+> The MCP proxy auto-restarts it, but if that fails — follow recovery below.
+
+#### Error classification:
+| Error type | Symptoms | Action |
+|-----------|----------|--------|
+| **Server Crash** | "MCP server disconnected", "connection reset", timeout, "tool not available" after it WAS working | → Recovery below |
+| **Plugin Disconnected** | MCP responds but returns empty/no data | → Tell user to restart plugin in Figma Desktop |
+| **Not Configured** | "tool not found" on very first call | → Step 0.0 |
+
+#### Recovery protocol (on MCP crash during ANY phase):
+1. **Detect:** Figma MCP call fails with connection/server error
+2. **Retry once:** Wait 3 seconds, try the SAME call again
+   - MCP proxy (if installed) will auto-restart the server in background
+3. **If retry succeeds:** Continue normally. Note: "MCP recovered after crash."
+4. **If retry fails:**
+   a. Tell user: "Figma MCP сервер упал. Проверь `/mcp` и перезапусти. Также убедись, что плагин figma-mcp-go запущен в Figma Desktop."
+   b. **Do NOT block work.** Continue with cached data:
+      - Extraction map exists → use it for all implementation
+      - Figma screenshot saved locally → use it for visual comparison
+      - Phase 5 (simulator) works WITHOUT Figma MCP (all local files)
+   c. After user restarts MCP → verify with a test call before resuming
+
+#### Prevention — MCP proxy (recommended):
+Auto-restart on crash via proxy wrapper:
+```json
+"figma-mcp-go": {
+  "command": "node",
+  "args": ["~/.claude/scripts/figma-mcp-proxy.js"]
+}
+```
+Install: `cp scripts/figma-mcp-proxy.js ~/.claude/scripts/`
+The proxy restarts `@vkhanhqui/figma-mcp-go` automatically (up to 10 times with backoff) and replays MCP init handshake — Claude Code never sees the interruption. No API key needed.
 
 ### Step 0.1 — Detect existing structure
 Check which of these files exist in the project:
@@ -260,9 +321,9 @@ After filling the extraction map, check:
 
 **If NO**: proceed to Phase 2. Do NOT make extra calls "just to be sure".
 
-### Step 1.4 — Get screenshot and SAVE LOCALLY (one Figma call, reuse forever)
+### Step 1.4 — Get screenshot and SAVE LOCALLY
 ```
-get_screenshot(fileKey, nodeId)
+get_screenshot(nodeIds: ["1:23"], format: "PNG", scale: 2)
 ```
 Call this if:
 - Phase 5 (visual validation loop) will be used (simulator MCP is available)
@@ -276,7 +337,49 @@ src/assets/figma/{ScreenName}_design.png
 This local file is your **permanent reference image**. All future comparisons in Phase 5
 use THIS LOCAL FILE — never re-fetch from Figma.
 
-**One screenshot per screen, at the root node level only. One Figma API call, zero re-fetches.**
+**One screenshot per screen, at the root node level only. Save once, reuse forever.**
+
+### Step 1.4.1 — Export icons and images from Figma
+
+> **This is where icons/images get downloaded.** Use the right format for each asset type.
+
+#### Format rules:
+| Asset type | Format | Scale | Why |
+|-----------|--------|-------|-----|
+| **Icons** (monochrome, simple shapes) | `SVG` | — | Vector, scales perfectly, tiny file size |
+| **Icons** (if SVG fails or RN can't render) | `PNG` | `3` | @3x for all densities |
+| **Illustrations** (complex vectors) | `SVG` | — | Vector quality at any size |
+| **Photos / raster images** | `PNG` | `2` | Good quality/size balance |
+| **Screen reference** (Phase 5) | `PNG` | `2` | For visual comparison only |
+
+#### Using `save_screenshots` for batch export:
+```
+save_screenshots(items: [
+  { nodeId: "1:23", outputPath: "src/assets/icons/home.svg", format: "SVG" },
+  { nodeId: "1:24", outputPath: "src/assets/icons/search.svg", format: "SVG" },
+  { nodeId: "1:25", outputPath: "src/assets/icons/profile.svg", format: "SVG" },
+  { nodeId: "1:30", outputPath: "src/assets/images/hero.png", format: "PNG", scale: 2 }
+])
+```
+
+#### Using `get_screenshot` for single export:
+```
+get_screenshot(nodeIds: ["1:23"], format: "SVG")
+get_screenshot(nodeIds: ["1:24"], format: "PNG", scale: 3)
+```
+
+#### Key rules:
+1. **Icons → ALWAYS try SVG first.** SVG renders crisply at any size, no @2x/@3x variants needed.
+2. **If SVG export is broken** (complex effects, rasterized fills) → fallback to PNG with `scale: 3`
+3. **Use `save_screenshots` for batch** — exports multiple assets in one call, saves to disk directly
+4. **File naming:** lowercase, kebab-case: `icon-home.svg`, `img-hero.png`
+5. **Save to correct folders:**
+   ```
+   src/assets/icons/    ← SVG and PNG icons
+   src/assets/images/   ← photos, illustrations
+   src/assets/figma/    ← design reference screenshots (Phase 5 only)
+   ```
+6. **Never use Figma image URLs in production code** — always download and use `require()`
 
 ### Step 1.5 — Get design tokens (ONLY if explicitly requested)
 ```
@@ -288,16 +391,23 @@ get_variable_defs(fileKey)
 
 Do NOT call this by default. Most implementations work fine with hex values from `get_design_context`.
 
-### Step 1.6 — Handling 429 (Rate Limit) errors
+### Step 1.6 — Handling Figma MCP errors
 
-If any Figma MCP call returns a 429 error:
-1. **STOP** — do not make any more Figma calls
-2. Note the `Retry-After` value (seconds to wait)
-3. Tell the user:
-   > "Figma API rate limit. Нужно подождать {N} секунд. Пока можно работать с уже извлечёнными данными."
-4. **Continue working** with whatever data you already have in the extraction map
-5. Only retry after the user confirms they've waited and wants to continue
-6. If you have enough data to implement (even partially), do it — don't block on missing nice-to-have data
+> figma-mcp-go has **no rate limits** (data via plugin bridge, not REST API).
+> The main failure mode is **server crash or plugin disconnect**.
+
+**A) Server crash / disconnect:**
+If a Figma MCP call fails with connection error, timeout, or "server disconnected":
+→ Follow the **recovery protocol** in Step 0.0.2 (retry once → continue with cached data → ask user to restart MCP if needed)
+
+**B) Plugin not running / empty data:**
+If MCP call succeeds but returns empty or "plugin not connected":
+1. Tell user: "Figma плагин не подключён. Открой Figma Desktop и запусти figma-mcp-go плагин в нужном файле."
+2. Wait for user confirmation, then retry
+
+**C) Wrong file open in Figma:**
+If data doesn't match the expected design (wrong nodes, missing sections):
+1. Tell user: "Данные не совпадают — проверь, что в Figma открыт правильный файл и плагин запущен."
 
 ---
 
@@ -692,26 +802,44 @@ text: {
 }
 ```
 
-### 3.9 Image from Figma assets
+### 3.9 Using Figma assets in code
+
+**SVG icons (preferred):**
+```typescript
+// react-native-svg required: npx expo install react-native-svg
+import { SvgXml } from 'react-native-svg';
+
+// Option A: import SVG as string (with metro transformer)
+import HomeSvg from '@/assets/icons/icon-home.svg';
+<HomeSvg width={scale(24)} height={scale(24)} fill={colors.textPrimary} />
+
+// Option B: read SVG file content inline
+const homeIcon = `<svg>...</svg>`;
+<SvgXml xml={homeIcon} width={scale(24)} height={scale(24)} />
+```
+
+**PNG icons (fallback when SVG fails):**
 ```typescript
 import { Image } from 'react-native';
 
-// Figma MCP may provide image URLs — use them directly during development:
 <Image
-  source={{ uri: figmaAssetUrl }}
+  source={require('@/assets/icons/icon-home.png')}
   style={{ width: scale(24), height: scale(24) }}
-/>
-
-// For SVG assets — react-native-svg:
-import { SvgUri } from 'react-native-svg';
-<SvgUri width={scale(24)} height={scale(24)} uri={figmaSvgUrl} />
-
-// For production — download assets and use require():
-<Image
-  source={require('@/assets/icons/icon-name.png')}
-  style={{ width: scale(24), height: scale(24) }}
+  resizeMode="contain"
 />
 ```
+
+**Photos / illustrations:**
+```typescript
+<Image
+  source={require('@/assets/images/hero.png')}
+  style={{ width: '100%', height: scale(200) }}
+  resizeMode="cover"
+/>
+```
+
+**NEVER use Figma URLs** — always use locally saved assets via `require()`.
+Icons from Step 1.4.1 should already be in `src/assets/icons/` and `src/assets/images/`.
 
 ---
 

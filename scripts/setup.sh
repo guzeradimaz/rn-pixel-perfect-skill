@@ -47,54 +47,41 @@ mkdir -p "$TARGET_PROJECT/.claude/skills"
 cp -r "$SKILL_DIR/.claude/skills/rn-pixel-perfect" "$TARGET_PROJECT/.claude/skills/"
 echo -e "${GREEN}  ✓ Скилл скопирован в .claude/skills/rn-pixel-perfect/${NC}"
 
-# ─── 3. Проверить Figma MCP ───
+# ─── 3. Проверить Figma MCP (figma-mcp-go) ───
 echo ""
-echo -e "${BLUE}[2/4] Проверяю Figma MCP...${NC}"
+echo -e "${BLUE}[2/4] Проверяю Figma MCP (figma-mcp-go)...${NC}"
 
 MCP_CONFIGURED=false
 if [ -f "$CLAUDE_GLOBAL" ]; then
-  # Проверяем наличие figma в mcpServers
-  if grep -q '"figma"' "$CLAUDE_GLOBAL" 2>/dev/null; then
+  if grep -q '"figma-mcp-go"' "$CLAUDE_GLOBAL" 2>/dev/null; then
     MCP_CONFIGURED=true
-    echo -e "${GREEN}  ✓ Figma MCP уже настроен в ~/.claude/settings.json${NC}"
+    echo -e "${GREEN}  ✓ figma-mcp-go уже настроен в ~/.claude/settings.json${NC}"
   fi
 fi
 
 if [ "$MCP_CONFIGURED" = false ]; then
-  echo -e "${YELLOW}  Figma MCP не найден. Настроим?${NC}"
-  echo ""
-  echo "  Для работы нужен Figma Personal Access Token."
-  echo "  Получить: Figma → Settings → Personal Access Tokens → Generate"
-  echo ""
-  echo -e "${YELLOW}  Вставь Figma Access Token (или Enter чтобы пропустить):${NC}"
-  read -rs FIGMA_TOKEN
-  echo ""
+  echo -e "${YELLOW}  figma-mcp-go не найден. Настроим? (Y/n):${NC}"
+  read -r SETUP_FIGMA
 
-  if [ -n "$FIGMA_TOKEN" ]; then
-    # Убедимся что ~/.claude/ существует
+  if [[ ! "$SETUP_FIGMA" =~ ^[Nn]$ ]]; then
     mkdir -p "$HOME/.claude"
 
-    # Единый скрипт: безопасно передаём токен через env, не через строковую интерполяцию
-    FIGMA_TOKEN="$FIGMA_TOKEN" python3 - "$CLAUDE_GLOBAL" <<'PYEOF'
+    python3 - "$CLAUDE_GLOBAL" <<'PYEOF'
 import json, os, sys
 
 settings_path = sys.argv[1]
-token = os.environ["FIGMA_TOKEN"]
 
-# Читаем существующий файл или создаём пустой объект
 data = {}
 if os.path.exists(settings_path):
     with open(settings_path, "r") as f:
         data = json.load(f)
 
-# Добавляем/обновляем Figma MCP
 if "mcpServers" not in data:
     data["mcpServers"] = {}
 
-data["mcpServers"]["figma"] = {
+data["mcpServers"]["figma-mcp-go"] = {
     "command": "npx",
-    "args": ["-y", "figma-developer-mcp"],
-    "env": {"FIGMA_ACCESS_TOKEN": token}
+    "args": ["-y", "@vkhanhqui/figma-mcp-go"]
 }
 
 with open(settings_path, "w") as f:
@@ -102,20 +89,76 @@ with open(settings_path, "w") as f:
 
 print("OK")
 PYEOF
-    echo -e "${GREEN}  ✓ Figma MCP настроен в ~/.claude/settings.json${NC}"
+    echo -e "${GREEN}  ✓ figma-mcp-go настроен в ~/.claude/settings.json${NC}"
+    echo ""
+    echo -e "  ${YELLOW}Важно:${NC} для работы нужен Figma Desktop с запущенным плагином:"
+    echo "  1. Figma Desktop → Plugins → Development → Import plugin from manifest"
+    echo "  2. Скачай plugin.zip из https://github.com/vkhanhqui/figma-mcp-go"
+    echo "  3. Запусти плагин в нужном Figma файле"
+    echo ""
+    echo "  API токен НЕ нужен — данные читаются через плагин, не через REST API."
+    echo "  Rate limits НЕТ — вызовы бесплатные и безлимитные."
   else
-    echo -e "${YELLOW}  ⚠ Figma MCP не настроен. Скилл будет работать без MCP,${NC}"
-    echo -e "${YELLOW}    но не сможет читать данные из Figma автоматически.${NC}"
+    echo -e "${YELLOW}  ⚠ Figma MCP не настроен. Скилл будет работать без MCP.${NC}"
     echo ""
     echo "  Чтобы настроить позже, добавь в ~/.claude/settings.json:"
     echo '  "mcpServers": {'
-    echo '    "figma": {'
+    echo '    "figma-mcp-go": {'
     echo '      "command": "npx",'
-    echo '      "args": ["-y", "figma-developer-mcp"],'
-    echo '      "env": { "FIGMA_ACCESS_TOKEN": "YOUR_TOKEN" }'
+    echo '      "args": ["-y", "@vkhanhqui/figma-mcp-go"]'
     echo '    }'
     echo '  }'
   fi
+fi
+
+# ─── 3.5. Установить MCP proxy для авто-перезапуска ───
+echo ""
+echo -e "${BLUE}[2.5/4] Настраиваю MCP proxy (авто-перезапуск при падении)...${NC}"
+
+PROXY_DIR="$HOME/.claude/scripts"
+PROXY_SRC="$SKILL_DIR/scripts/figma-mcp-proxy.js"
+PROXY_DST="$PROXY_DIR/figma-mcp-proxy.js"
+
+if [ -f "$PROXY_SRC" ]; then
+  mkdir -p "$PROXY_DIR"
+  cp "$PROXY_SRC" "$PROXY_DST"
+  chmod +x "$PROXY_DST"
+  echo -e "${GREEN}  ✓ Proxy установлен: $PROXY_DST${NC}"
+
+  # Обновляем settings.json — переключаем figma-mcp-go на proxy
+  if grep -q '"figma-mcp-go"' "$CLAUDE_GLOBAL" 2>/dev/null; then
+    python3 - "$CLAUDE_GLOBAL" "$PROXY_DST" <<'PYEOF'
+import json, os, sys
+
+settings_path = sys.argv[1]
+proxy_path = sys.argv[2]
+
+data = {}
+if os.path.exists(settings_path):
+    with open(settings_path, "r") as f:
+        data = json.load(f)
+
+figma_cfg = data.get("mcpServers", {}).get("figma-mcp-go", {})
+if not figma_cfg:
+    print("SKIP: no figma-mcp-go config found")
+    sys.exit(0)
+
+# Update to proxy (no API key needed for figma-mcp-go)
+data["mcpServers"]["figma-mcp-go"] = {
+    "command": "node",
+    "args": [proxy_path]
+}
+
+with open(settings_path, "w") as f:
+    json.dump(data, f, indent=2)
+
+print("OK: migrated to proxy")
+PYEOF
+    echo -e "${GREEN}  ✓ settings.json обновлён — figma-mcp-go теперь через proxy${NC}"
+    echo -e "  Proxy автоматически перезапускает сервер при падении (до 10 раз)."
+  fi
+else
+  echo -e "${YELLOW}  ⚠ figma-mcp-proxy.js не найден в $SKILL_DIR/scripts/${NC}"
 fi
 
 # ─── 4. Проверить iOS Simulator MCP ───
