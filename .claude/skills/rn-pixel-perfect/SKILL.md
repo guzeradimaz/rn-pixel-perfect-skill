@@ -50,6 +50,62 @@ getShadow  → cross-platform shadows from src/theme/shadows.ts
 
 ---
 
+## FIGMA API RATE LIMIT STRATEGY
+
+> **CRITICAL: Read this before making ANY Figma MCP call.**
+> Figma API has strict rate limits. Tier 1 endpoints (file/node data) allow only
+> **10–20 requests per minute** for Dev/Full seats. View/Collab seats get **6 requests per MONTH**.
+> Hitting the limit returns HTTP 429 and blocks you for the duration of `Retry-After`.
+
+### Golden rule: EXTRACT MAXIMUM DATA PER CALL
+
+Every Figma MCP call is expensive. Treat each call as if you only have 5 total for the entire screen.
+
+### Request budget per screen
+
+| Task | Max calls | Tools |
+|------|-----------|-------|
+| Simple component | 1–2 | `get_design_context` (+ `get_screenshot` if needed) |
+| Full screen | 3–5 | `get_design_context` root + 1-2 child sections + `get_screenshot` |
+| Screen + theme sync | 4–6 | above + `get_variable_defs` |
+
+**NEVER exceed 6 Figma MCP calls for a single screen implementation.**
+
+### Rules
+
+1. **ONE call to `get_design_context` for the root node FIRST.** Extract EVERYTHING from this single response — layout, colors, typography, spacing, children hierarchy. Write it all down in the extraction map immediately.
+2. **Do NOT call child nodes unless data is provably missing.** If the root response contains child data (even partial), use it. Only fetch a child node if its critical values (colors, sizes, typography) are completely absent from the root response.
+3. **Do NOT call `get_variable_defs` by default.** Only call it if the user explicitly asks to sync Figma Variables/design tokens, OR if colors/typography in the root response reference variable names instead of raw values.
+4. **Do NOT call `get_metadata` by default.** Only call it if the root `get_design_context` response is severely truncated (missing entire sections of the screen).
+5. **`get_screenshot` — call ONCE for the root node.** Do not take screenshots of individual components.
+6. **NEVER re-fetch data you already have.** The extraction map from Step 1.2 is your cache. If Phase 4 validation finds a missing value, check the original MCP response text first. Only re-call MCP as absolute last resort.
+7. **If you get a 429 error:** STOP all Figma calls immediately. Tell the user: "Figma API rate limit hit. Wait N seconds (from Retry-After header) before continuing." Do NOT retry automatically — wait for user confirmation.
+8. **Batch your planning.** Before making any MCP call, plan exactly what data you need from it. Write down the questions you need answered. Then make the call and extract ALL answers at once.
+
+### Call sequence (optimized)
+
+```
+CALL 1: get_design_context(fileKey, rootNodeId)
+        → Extract EVERYTHING: layout, colors, fonts, spacing, children
+        → Fill the complete extraction map
+        → Decide: is any section truly missing?
+
+CALL 2 (only if needed): get_design_context(fileKey, childNodeId)
+        → Only for a section that was truncated/missing in Call 1
+        → Merge into extraction map
+
+CALL 3 (only if needed): get_screenshot(fileKey, rootNodeId)
+        → For Phase 4 visual validation
+        → Save once, reuse forever
+
+CALL 4 (only if explicitly requested): get_variable_defs(fileKey)
+        → For theme token sync only
+```
+
+**Typical screen: 2-3 calls total. Complex screen: 4-5 max.**
+
+---
+
 ## PHASE 0 — PROJECT SCAFFOLDING
 
 > Before any coding, verify the project has everything needed.
@@ -109,7 +165,8 @@ It will be updated in Phase 1 if the Figma frame width differs.
 
 ## PHASE 1 — FIGMA RECONNAISSANCE
 
-> Run ALL Figma MCP tools BEFORE writing a single line of code.
+> **Minimize Figma API calls.** Follow the Rate Limit Strategy above.
+> Goal: extract ALL data in 2-3 calls max, then never re-fetch.
 > If the user just pastes a Figma link — start from Phase 0, then Phase 1 automatically.
 
 ### Step 1.1 — Parse URL
@@ -122,22 +179,24 @@ https://figma.com/proto/{fileKey}/Name?node-id={nodeId}
 Node IDs in URLs use `-` as separator (e.g., `1-2`), but the MCP may need `:` format (e.g., `1:2`).
 Try both formats if one fails.
 
-### Step 1.2 — Get design context (primary source)
-Call the Figma MCP tool:
+### Step 1.2 — Get design context (THE PRIMARY CALL)
 ```
 get_design_context(fileKey, nodeId)
 ```
-This returns layout, spacing, colors, typography, and component hierarchy.
+**This is your most important and often ONLY Figma call.** Make it count.
+
+The MCP returns layout, spacing, colors, typography, and component hierarchy.
 The MCP may return React + Tailwind code — **IGNORE the Tailwind classes**, use only raw px values.
 
-**CRITICAL: Write down a structured extraction map.**
-After getting the design context, fill in this JSON structure for EVERY component/layer.
-This is your single source of truth — all code values come from here, never from memory.
+**CRITICAL: Immediately write down a COMPLETE extraction map.**
+Go through the ENTIRE response and extract EVERY value into this JSON structure.
+This is your single source of truth and your CACHE — you will NOT re-fetch this data.
 
 ```json
 {
   "screen": "{ScreenName}",
   "frame": { "width": 390, "height": 844 },
+  "figmaCalls": { "used": 1, "budget": 5 },
   "components": [
     {
       "name": "Header",
@@ -169,31 +228,52 @@ This is your single source of truth — all code values come from here, never fr
 
 **Rules for extraction:**
 - Record EVERY px value exactly as Figma shows it — do not round or guess
-- If a value is ambiguous, re-call `get_design_context` for that specific child node
-- If MCP data is truncated, note `"MISSING"` and fetch the child node separately
+- If a value seems ambiguous, make a reasonable inference from context (parent padding, sibling sizes) — do NOT immediately re-call MCP
+- Mark truly missing critical values as `"INCOMPLETE"` — these are the ONLY reason to make another call
 - Frame width ≠ 390 → update `BASE_WIDTH` in `scale.ts` BEFORE coding
+- **Track your call count** in the extraction map `figmaCalls` field
 
-### Step 1.3 — Get visual reference (source of truth)
+### Step 1.3 — Assess: do you need more data?
+
+After filling the extraction map, check:
+- Are there `"INCOMPLETE"` values that block implementation? (not just nice-to-have)
+- Are entire screen sections missing from the response?
+
+**If YES** (truly blocking data is missing): make ONE additional `get_design_context` call for the largest missing section. Update the extraction map. Increment `figmaCalls.used`.
+
+**If NO**: proceed to Phase 2. Do NOT make extra calls "just to be sure".
+
+### Step 1.4 — Get screenshot (OPTIONAL, one call max)
 ```
 get_screenshot(fileKey, nodeId)
 ```
-Save screenshot path — this is the ground truth for Phase 4 validation.
-Save the screenshot to `src/assets/figma/{ScreenName}.png` for DebugOverlay.
+Only call this if:
+- The user explicitly asks for visual validation / DebugOverlay
+- You're implementing a complex screen and need visual reference for ambiguous layout
 
-### Step 1.4 — Get design tokens (if Figma Variables exist)
+Save to `src/assets/figma/{ScreenName}.png` for DebugOverlay.
+**One screenshot per screen, at the root node level only.**
+
+### Step 1.5 — Get design tokens (ONLY if explicitly requested)
 ```
 get_variable_defs(fileKey)
 ```
-If Figma Variables are defined, sync them to `src/theme/` in Phase 2.
-This step may not return results if the Figma file doesn't use Variables.
+**Only call this if:**
+- The user explicitly asks to sync Figma Variables / design tokens
+- Colors in the design context reference variable names instead of hex values
 
-### Step 1.5 — Get child nodes for large/complex screens
-If design context is truncated or the screen has many sections:
-```
-get_metadata(fileKey, nodeId)
-```
-Then fetch each major section separately by its childNodeId.
-Plan the component decomposition from this hierarchy.
+Do NOT call this by default. Most implementations work fine with hex values from `get_design_context`.
+
+### Step 1.6 — Handling 429 (Rate Limit) errors
+
+If any Figma MCP call returns a 429 error:
+1. **STOP** — do not make any more Figma calls
+2. Note the `Retry-After` value (seconds to wait)
+3. Tell the user:
+   > "Figma API rate limit. Нужно подождать {N} секунд. Пока можно работать с уже извлечёнными данными."
+4. **Continue working** with whatever data you already have in the extraction map
+5. Only retry after the user confirms they've waited and wants to continue
+6. If you have enough data to implement (even partially), do it — don't block on missing nice-to-have data
 
 ---
 
@@ -679,13 +759,15 @@ import { DebugOverlay } from '@/utils/DebugOverlay';
 ```
 Tap the overlay to cycle opacity: 30% → 50% → 70% → hidden → 30%...
 
-### 4.4 — Fix loop
+### 4.4 — Fix loop (NO re-fetching)
 If any verification fails:
 1. Find the exact Figma value from the extraction map (NOT from memory)
-2. If the extraction map has `"MISSING"` — re-call `get_design_context` for that node
+2. If the extraction map has `"INCOMPLETE"` — first try to infer from context (parent dimensions, sibling components, design patterns). Only re-call `get_design_context` as absolute last resort AND only if you're under the call budget.
 3. Fix the code value
 4. Re-run the verification table for that component
 5. Repeat until all rows show ✓
+
+**Do NOT re-fetch from Figma for minor discrepancies.** The extraction map is your source of truth. If a value is slightly ambiguous, use your best judgment from the surrounding context.
 
 ### 4.5 — Final summary
 After all verification passes, output a brief summary:
@@ -696,6 +778,7 @@ RESULT: {ScreenName}
 - Tokens: 3 colors added, 1 typography style added
 - Verification: 47/47 values match ✓
 - DebugOverlay: added
+- Figma API calls: 2 used / 5 budget ✓
 ```
 
 ---
