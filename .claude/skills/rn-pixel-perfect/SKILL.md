@@ -1052,6 +1052,138 @@ The entire Phase 5 loop works with **only local files**:
 
 ---
 
+## PHASE 6 — FINAL VERIFICATION GATE
+
+> **MANDATORY. CANNOT BE SKIPPED. Task is NOT complete until this gate passes.**
+> This is the last thing before delivering the result to the user.
+> If ANY check fails → fix → re-run the ENTIRE gate. Loop until 100%.
+
+### 6.1 — Requirements checklist (automated)
+
+Run through EVERY check. Output as a table. **ALL must be ✓.**
+
+```
+FINAL GATE: {ScreenName}
+═══════════════════════════════════════════════════════════════
+REQUIREMENTS CHECK
+┌────┬─────────────────────────────────────────────────┬────────┐
+│ #  │ Requirement                                     │ Status │
+├────┼─────────────────────────────────────────────────┼────────┤
+│  1 │ useSafeAreaInsets() — no hardcoded notch        │ ✓ / ✗  │
+│  2 │ Zero hex colors in StyleSheet (only colors.*)   │ ✓ / ✗  │
+│  3 │ Zero bare numbers in StyleSheet (scale/vs/ms)   │ ✓ / ✗  │
+│  4 │ Platform.select for fontFamily                  │ ✓ / ✗  │
+│  5 │ getShadow() with backgroundColor on same View   │ ✓ / ✗  │
+│  6 │ letterSpacing — direct value, no scale()        │ ✓ / ✗  │
+│  7 │ borderWidth — direct value, no scale()          │ ✓ / ✗  │
+│  8 │ activeOpacity on every TouchableOpacity         │ ✓ / ✗  │
+│  9 │ keyExtractor on every FlatList (not index)      │ ✓ / ✗  │
+│ 10 │ placeholderTextColor on every TextInput         │ ✓ / ✗  │
+│ 11 │ showsVerticalScrollIndicator={false}            │ ✓ / ✗  │
+│ 12 │ No Tailwind/NativeWind classes                  │ ✓ / ✗  │
+│ 13 │ No inline styles with magic numbers             │ ✓ / ✗  │
+│ 14 │ No import from icon packages (use Figma assets) │ ✓ / ✗  │
+│ 15 │ Icons exported as SVG (or PNG@3x fallback)      │ ✓ / ✗  │
+│ 16 │ All assets in src/assets/ (no Figma URLs)       │ ✓ / ✗  │
+│ 17 │ Theme tokens used (colors, typography, spacing) │ ✓ / ✗  │
+│ 18 │ scale() for horizontal, vs() for vertical       │ ✓ / ✗  │
+│ 19 │ ms() only for fontSize/lineHeight/iconSize      │ ✓ / ✗  │
+│ 20 │ TypeScript — no `any`, proper types              │ ✓ / ✗  │
+├────┼─────────────────────────────────────────────────┼────────┤
+│    │ TOTAL                                           │ __/20  │
+└────┴─────────────────────────────────────────────────┴────────┘
+```
+
+**If any ✗ → fix the code → re-run this table. Do NOT proceed.**
+
+### 6.2 — Value accuracy re-check
+
+Re-read EVERY generated file. For each StyleSheet property, verify against the extraction map:
+
+```
+VALUE ACCURACY: {ScreenName}
+┌──────────────────┬───────────────┬──────────┬────────┐
+│ File             │ Total values  │ Matching │ Status │
+├──────────────────┼───────────────┼──────────┼────────┤
+│ HomeScreen.tsx   │ 34            │ 34       │ 100% ✓ │
+│ HomeCard.tsx     │ 22            │ 22       │ 100% ✓ │
+│ HomeHeader.tsx   │ 18            │ 18       │ 100% ✓ │
+│ colors.ts        │ 8             │ 8        │ 100% ✓ │
+│ typography.ts    │ 6             │ 6        │ 100% ✓ │
+├──────────────────┼───────────────┼──────────┼────────┤
+│ TOTAL            │ 88            │ 88       │ 100% ✓ │
+└──────────────────┴───────────────┴──────────┴────────┘
+```
+
+**If any file < 100% → list the mismatched values → fix → re-check.**
+
+### 6.3 — Visual match confirmation
+
+**If simulator MCP is available:**
+1. Take a FINAL screenshot of the implemented screen
+2. Compare side-by-side with Figma design (local PNG)
+3. The result MUST be ≥ 99.9% match from Phase 5
+4. If Phase 5 was not run yet → run it NOW before proceeding
+
+**If simulator MCP is NOT available:**
+1. Re-read the Figma screenshot (local PNG from Step 1.4)
+2. Re-read all component code
+3. Mentally verify every area matches the design
+4. List any areas of uncertainty
+
+### 6.4 — Figma re-fetch verification (final truth check)
+
+> This is the ONE place where re-fetching from Figma is allowed.
+
+1. Call `get_design_context` ONE more time for the root node
+2. Compare the FRESH data against your extraction map — verify nothing was misread in Phase 1
+3. Check 5 random values from the fresh response against the generated code
+4. If any mismatch found → fix → re-run 6.2
+
+**Skip this step ONLY if:**
+- Figma MCP is disconnected and cannot be recovered
+- You already used get_design_context in the last 5 minutes (data is fresh)
+
+### 6.5 — Gate verdict
+
+**ALL of these must be true to pass:**
+- [ ] 6.1 Requirements: 20/20 ✓
+- [ ] 6.2 Value accuracy: 100% across all files
+- [ ] 6.3 Visual match: ≥ 99.9% (or manual confirmation if no simulator)
+- [ ] 6.4 Figma re-fetch: no mismatches (or skipped with reason)
+
+```
+FINAL VERDICT: {ScreenName}
+═══════════════════════════════════════════════════
+│ Requirements:     20/20 ✓                       │
+│ Value accuracy:   88/88 (100%) ✓                │
+│ Visual match:     99.9%+ ✓                      │
+│ Figma re-fetch:   5/5 values confirmed ✓        │
+│                                                 │
+│ ██████████████████████████████████████ PASSED ✓  │
+═══════════════════════════════════════════════════
+```
+
+### 6.6 — Gate FAILED → fix loop
+
+**If the gate fails at ANY step:**
+1. List ALL failures with exact file:line and what's wrong
+2. Fix every issue
+3. **Re-run the ENTIRE Phase 6 from 6.1** — not just the failed step
+4. Repeat until PASSED
+
+**There is NO maximum iteration limit for Phase 6.** The task is not delivered until the gate passes.
+
+### 6.7 — Deliver to user
+
+ONLY after the gate passes:
+1. Output the final PASSED verdict table
+2. List all created/modified files
+3. Tell the user: "Готово. Все проверки пройдены."
+4. **Do NOT stop early. Do NOT say "looks good" without running the gate.**
+
+---
+
 ## ANTI-PATTERNS — NEVER DO
 
 ```typescript
@@ -1137,24 +1269,31 @@ src/
 **User pastes a Figma link:**
 > "Верстай HomeScreen по https://figma.com/design/abc/App?node-id=1-2"
 
-→ Phase 0 (scaffold) → Phase 1 (extract + save screenshot locally) → Phase 2 (sync tokens) → Phase 3 (implement) → Phase 4 (code audit) → Phase 5 (simulator visual loop until 99.9%+)
+→ Phase 0 → Phase 1 → Phase 2 → Phase 3 → Phase 4 → Phase 5 → **Phase 6 (final gate)**
 
 **User wants a single component:**
 > "Добавь компонент карточки из Figma https://..."
 
-→ Phase 0 (check utils exist) → Phase 1 (design_context for that node) → Phase 3.5 template → Phase 4.2 checklist
+→ Phase 0 → Phase 1 → Phase 3.5 → Phase 4.2 → **Phase 6 (final gate)**
 
 **User wants to sync theme only:**
 > "Обнови тему из Figma Variables https://..."
 
-→ Phase 1.5 (get_variable_defs) → Phase 2 (full token sync) → done
+→ Phase 1.5 → Phase 2 → done (no Phase 6 — theme-only sync)
 
 **User wants validation only:**
 > "Проверь совпадение с дизайном"
 
-→ Phase 5 (simulator visual loop) if simulator MCP available, otherwise Phase 4 only
+→ Phase 5 → **Phase 6 (final gate)**
+
+**User selects in Figma:**
+> "Верстай выделенное"
+
+→ get_selection → Phase 0 → Phase 1 → Phase 2 → Phase 3 → Phase 4 → Phase 5 → **Phase 6**
 
 **User provides Figma link without instructions:**
 > "https://figma.com/design/abc/App?node-id=1-2"
 
-→ Full cycle: Phase 0 → Phase 1 → Phase 2 → Phase 3 → Phase 4 → Phase 5 (visual loop)
+→ Full cycle: Phase 0 → Phase 1 → Phase 2 → Phase 3 → Phase 4 → Phase 5 → **Phase 6 (final gate)**
+
+> **Phase 6 is MANDATORY for any task that produces code.** Task is NEVER delivered without passing the final gate.
