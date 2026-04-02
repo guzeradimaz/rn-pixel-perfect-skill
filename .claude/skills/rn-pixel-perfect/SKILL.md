@@ -126,7 +126,24 @@ Before calling any Figma tools, verify the MCP is available:
    ```
    - Token получить: Figma → Settings → Personal Access Tokens → Generate
    - After adding, restart Claude Code for MCP to load
-3. If the MCP IS available — proceed to Step 0.1
+3. If the MCP IS available — proceed to Step 0.0.1
+
+### Step 0.0.1 — Check iOS Simulator MCP availability
+Check if the `mobile-mcp` (or `ios-simulator`) MCP is available:
+1. Try calling `mobile_take_screenshot` or `screenshot` tool
+2. If NOT available — tell the user:
+   > "iOS Simulator MCP не подключён. Без него Phase 5 (автоматическая визуальная проверка) будет пропущена. Запусти `bash scripts/setup.sh` или добавь вручную:"
+   ```json
+   "mcpServers": {
+     "mobile-mcp": {
+       "command": "npx",
+       "args": ["-y", "@mobilenext/mobile-mcp@latest"]
+     }
+   }
+   ```
+   - Перед использованием загрузи симулятор: `xcrun simctl boot "iPhone 16"`
+3. If available — set `simulatorMCP = true` (enables Phase 5 visual loop)
+4. **Phase 5 is MANDATORY when simulator MCP is available.** The implementation is NOT complete until visual validation passes.
 
 ### Step 0.1 — Detect existing structure
 Check which of these files exist in the project:
@@ -243,16 +260,23 @@ After filling the extraction map, check:
 
 **If NO**: proceed to Phase 2. Do NOT make extra calls "just to be sure".
 
-### Step 1.4 — Get screenshot (OPTIONAL, one call max)
+### Step 1.4 — Get screenshot and SAVE LOCALLY (one Figma call, reuse forever)
 ```
 get_screenshot(fileKey, nodeId)
 ```
-Only call this if:
+Call this if:
+- Phase 5 (visual validation loop) will be used (simulator MCP is available)
 - The user explicitly asks for visual validation / DebugOverlay
-- You're implementing a complex screen and need visual reference for ambiguous layout
+- You're implementing a complex screen and need visual reference
 
-Save to `src/assets/figma/{ScreenName}.png` for DebugOverlay.
-**One screenshot per screen, at the root node level only.**
+**CRITICAL: Save the screenshot LOCALLY immediately.**
+```
+src/assets/figma/{ScreenName}_design.png
+```
+This local file is your **permanent reference image**. All future comparisons in Phase 5
+use THIS LOCAL FILE — never re-fetch from Figma.
+
+**One screenshot per screen, at the root node level only. One Figma API call, zero re-fetches.**
 
 ### Step 1.5 — Get design tokens (ONLY if explicitly requested)
 ```
@@ -769,17 +793,134 @@ If any verification fails:
 
 **Do NOT re-fetch from Figma for minor discrepancies.** The extraction map is your source of truth. If a value is slightly ambiguous, use your best judgment from the surrounding context.
 
-### 4.5 — Final summary
-After all verification passes, output a brief summary:
+### 4.5 — Phase 4 summary (then proceed to Phase 5)
+After code verification passes:
 ```
-RESULT: {ScreenName}
+CODE AUDIT: {ScreenName}
 - Components: 5 created (Header, Card, Button, Badge, ListItem)
 - Files: 5 new, 2 updated (colors.ts, typography.ts)
 - Tokens: 3 colors added, 1 typography style added
 - Verification: 47/47 values match ✓
-- DebugOverlay: added
 - Figma API calls: 2 used / 5 budget ✓
+- Next: Phase 5 (simulator visual validation)
 ```
+**Do NOT stop here.** If simulator MCP is available, proceed to Phase 5.
+
+---
+
+## PHASE 5 — VISUAL VALIDATION LOOP (iOS Simulator)
+
+> **MANDATORY when iOS Simulator MCP is available.**
+> This is the final gate. The screen is NOT done until this loop passes.
+> Target: **99.9%+ visual match** with the Figma design.
+
+### Prerequisites
+- iOS Simulator is booted (`xcrun simctl boot "iPhone 16"`)
+- App is running in the simulator (Expo / bare RN dev server)
+- Figma screenshot is saved locally at `src/assets/figma/{ScreenName}_design.png` (from Step 1.4)
+- Simulator MCP (`mobile-mcp` or `ios-simulator`) is connected
+
+### 5.1 — Navigate to the screen
+Use simulator MCP tools to navigate to the implemented screen:
+```
+mobile_launch_app(bundle_id)              ← launch the app
+mobile_click_on_screen_at_coordinates(x, y)  ← tap to navigate if needed
+mobile_swipe_on_screen(...)              ← scroll if needed
+```
+
+### 5.2 — Take simulator screenshot
+```
+mobile_take_screenshot() or screenshot(output_path)
+```
+Save to a TEMPORARY local path:
+```
+/tmp/{ScreenName}_simulator_{iteration}.png
+```
+**This costs ZERO Figma API calls** — it's a local simulator operation.
+
+### 5.3 — Visual comparison (THE CORE LOOP)
+
+**Read BOTH images and compare them side-by-side:**
+1. Read the LOCAL Figma design file: `src/assets/figma/{ScreenName}_design.png`
+2. Read the simulator screenshot: `/tmp/{ScreenName}_simulator_{iteration}.png`
+3. Compare them visually, area by area, top to bottom:
+
+**Comparison checklist — go through EVERY area:**
+
+```
+VISUAL COMPARISON: {ScreenName} — Iteration {N}
+┌──────────────────────┬────────────┬─────────────────────────────────────┐
+│ Area                 │ Match      │ Discrepancy                         │
+├──────────────────────┼────────────┼─────────────────────────────────────┤
+│ Status bar area      │ ✓ / ✗      │                                     │
+│ Header / NavBar      │ ✓ / ✗      │ e.g., "title 2px too low"           │
+│ Section 1            │ ✓ / ✗      │                                     │
+│ Section 2            │ ✓ / ✗      │                                     │
+│ Cards / List items   │ ✓ / ✗      │                                     │
+│ Buttons / CTAs       │ ✓ / ✗      │                                     │
+│ Colors match         │ ✓ / ✗      │ e.g., "bg slightly different"       │
+│ Typography match     │ ✓ / ✗      │ e.g., "font size off by 1px"        │
+│ Spacing / gaps       │ ✓ / ✗      │ e.g., "gap between cards too wide"  │
+│ Border radius        │ ✓ / ✗      │                                     │
+│ Shadows / elevation  │ ✓ / ✗      │                                     │
+│ Bottom area / Footer │ ✓ / ✗      │                                     │
+│ Overall alignment    │ ✓ / ✗      │                                     │
+├──────────────────────┼────────────┼─────────────────────────────────────┤
+│ TOTAL MATCH          │   ____%    │                                     │
+└──────────────────────┴────────────┴─────────────────────────────────────┘
+```
+
+### 5.4 — Fix and repeat
+
+**If match < 99.9%:**
+1. List ALL discrepancies found in the comparison table
+2. For each discrepancy:
+   a. Identify the exact component and StyleSheet property causing it
+   b. Look up the correct value from the extraction map (Phase 1 — LOCAL cache, no Figma calls)
+   c. Fix the code
+3. Wait for hot reload / rebuild
+4. **Go back to Step 5.2** — take a NEW simulator screenshot and compare again
+
+**Loop continues until ALL rows show ✓ and total match ≥ 99.9%.**
+
+### 5.5 — Acceptable exceptions (do NOT count as failures)
+
+These differences are expected and should NOT block the loop:
+- Dynamic content (placeholder text vs real text — structure must match, content may differ)
+- System UI differences (status bar time, battery, signal icons)
+- Simulator-specific rendering (slight font antialiasing differences)
+- Navigation chrome (if the screen uses native navigation headers)
+
+### 5.6 — Max iterations safety valve
+
+**Maximum 10 iterations.** If after 10 rounds the match is still < 99.9%:
+1. Output the final comparison table with remaining discrepancies
+2. Tell the user:
+   > "Достигнут лимит итераций. Текущее совпадение: {N}%. Оставшиеся расхождения: {list}. Нужна ручная проверка."
+3. List the specific CSS properties / components that still differ
+4. Ask the user if they want to continue fixing or accept the current state
+
+### 5.7 — Final result
+
+After the loop passes (match ≥ 99.9%):
+```
+PIXEL-PERFECT VALIDATION: {ScreenName}
+- Iterations: 3
+- Final match: 99.9%+
+- Figma reference: src/assets/figma/{ScreenName}_design.png (LOCAL)
+- Final screenshot: /tmp/{ScreenName}_simulator_final.png
+- Figma API calls used: 0 (all comparisons from local files)
+- All areas: ✓
+```
+
+### 5.8 — Key principle: ZERO Figma API calls in Phase 5
+
+The entire Phase 5 loop works with **only local files**:
+- Figma design = local PNG saved in Step 1.4 (fetched ONCE)
+- Simulator screenshot = taken locally via Simulator MCP (unlimited, free)
+- Extraction map = cached JSON from Step 1.2 (in conversation context)
+
+**No Figma API calls are made during the visual validation loop. Ever.**
 
 ---
 
@@ -868,24 +1009,24 @@ src/
 **User pastes a Figma link:**
 > "Верстай HomeScreen по https://figma.com/design/abc/App?node-id=1-2"
 
-→ Phase 0 (scaffold) → Phase 1 (all steps) → Phase 2 (sync tokens) → Phase 3 (implement) → Phase 4 (validate)
+→ Phase 0 (scaffold) → Phase 1 (extract + save screenshot locally) → Phase 2 (sync tokens) → Phase 3 (implement) → Phase 4 (code audit) → Phase 5 (simulator visual loop until 99.9%+)
 
 **User wants a single component:**
 > "Добавь компонент карточки из Figma https://..."
 
-→ Phase 0 (check utils exist) → Phase 1 (design_context + screenshot for that node) → Phase 3.5 template → Phase 4.2 checklist
+→ Phase 0 (check utils exist) → Phase 1 (design_context for that node) → Phase 3.5 template → Phase 4.2 checklist
 
 **User wants to sync theme only:**
 > "Обнови тему из Figma Variables https://..."
 
-→ Phase 1.4 (get_variable_defs) → Phase 2 (full token sync) → done
+→ Phase 1.5 (get_variable_defs) → Phase 2 (full token sync) → done
 
 **User wants validation only:**
 > "Проверь совпадение с дизайном"
 
-→ Phase 4 only (add DebugOverlay, run checklist)
+→ Phase 5 (simulator visual loop) if simulator MCP available, otherwise Phase 4 only
 
 **User provides Figma link without instructions:**
 > "https://figma.com/design/abc/App?node-id=1-2"
 
-→ Treat as full screen implementation: Phase 0 → Phase 1 → Phase 2 → Phase 3 → Phase 4
+→ Full cycle: Phase 0 → Phase 1 → Phase 2 → Phase 3 → Phase 4 → Phase 5 (visual loop)

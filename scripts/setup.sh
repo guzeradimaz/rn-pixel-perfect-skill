@@ -42,14 +42,14 @@ echo -e "${GREEN}Проект: $TARGET_PROJECT${NC}"
 echo ""
 
 # ─── 2. Копировать скилл ───
-echo -e "${BLUE}[1/3] Копирую скилл в проект...${NC}"
+echo -e "${BLUE}[1/4] Копирую скилл в проект...${NC}"
 mkdir -p "$TARGET_PROJECT/.claude/skills"
 cp -r "$SKILL_DIR/.claude/skills/rn-pixel-perfect" "$TARGET_PROJECT/.claude/skills/"
 echo -e "${GREEN}  ✓ Скилл скопирован в .claude/skills/rn-pixel-perfect/${NC}"
 
 # ─── 3. Проверить Figma MCP ───
 echo ""
-echo -e "${BLUE}[2/3] Проверяю Figma MCP...${NC}"
+echo -e "${BLUE}[2/4] Проверяю Figma MCP...${NC}"
 
 MCP_CONFIGURED=false
 if [ -f "$CLAUDE_GLOBAL" ]; then
@@ -118,9 +118,72 @@ PYEOF
   fi
 fi
 
-# ─── 4. Проверить зависимости проекта ───
+# ─── 4. Проверить iOS Simulator MCP ───
 echo ""
-echo -e "${BLUE}[3/3] Проверяю зависимости проекта...${NC}"
+echo -e "${BLUE}[3/4] Проверяю iOS Simulator MCP...${NC}"
+
+SIMULATOR_MCP_CONFIGURED=false
+if [ -f "$CLAUDE_GLOBAL" ]; then
+  if grep -q '"mobile-mcp"' "$CLAUDE_GLOBAL" 2>/dev/null || grep -q '"ios-simulator"' "$CLAUDE_GLOBAL" 2>/dev/null; then
+    SIMULATOR_MCP_CONFIGURED=true
+    echo -e "${GREEN}  ✓ iOS Simulator MCP уже настроен${NC}"
+  fi
+fi
+
+if [ "$SIMULATOR_MCP_CONFIGURED" = false ]; then
+  echo -e "${YELLOW}  iOS Simulator MCP не найден.${NC}"
+  echo "  Он нужен для Phase 5 — автоматической визуальной проверки."
+  echo "  Скилл будет сравнивать скриншот симулятора с Figma-дизайном"
+  echo "  и автоматически исправлять код до 99.9%+ совпадения."
+  echo ""
+  echo -e "${YELLOW}  Добавить iOS Simulator MCP? (y/N):${NC}"
+  read -r ADD_SIMULATOR
+
+  if [[ "$ADD_SIMULATOR" =~ ^[Yy]$ ]]; then
+    mkdir -p "$HOME/.claude"
+
+    python3 - "$CLAUDE_GLOBAL" <<'PYEOF'
+import json, os, sys
+
+settings_path = sys.argv[1]
+
+data = {}
+if os.path.exists(settings_path):
+    with open(settings_path, "r") as f:
+        data = json.load(f)
+
+if "mcpServers" not in data:
+    data["mcpServers"] = {}
+
+data["mcpServers"]["mobile-mcp"] = {
+    "command": "npx",
+    "args": ["-y", "@mobilenext/mobile-mcp@latest"]
+}
+
+with open(settings_path, "w") as f:
+    json.dump(data, f, indent=2)
+
+print("OK")
+PYEOF
+    echo -e "${GREEN}  ✓ iOS Simulator MCP настроен в ~/.claude/settings.json${NC}"
+    echo ""
+    echo "  Перед использованием загрузи симулятор:"
+    echo -e "  ${BLUE}xcrun simctl boot \"iPhone 16\"${NC}"
+  else
+    echo -e "${YELLOW}  ⚠ iOS Simulator MCP не настроен.${NC}"
+    echo "  Phase 5 (автоматическая визуальная проверка) будет пропущена."
+    echo ""
+    echo "  Чтобы настроить позже, добавь в ~/.claude/settings.json:"
+    echo '  "mobile-mcp": {'
+    echo '    "command": "npx",'
+    echo '    "args": ["-y", "@mobilenext/mobile-mcp@latest"]'
+    echo '  }'
+  fi
+fi
+
+# ─── 5. Проверить зависимости проекта ───
+echo ""
+echo -e "${BLUE}[4/4] Проверяю зависимости проекта...${NC}"
 
 if [ -f "$TARGET_PROJECT/package.json" ]; then
   MISSING_DEPS=""
