@@ -50,6 +50,20 @@ getShadow  → cross-platform shadows from src/theme/shadows.ts
 
 ---
 
+## CORE PRINCIPLES (read FIRST, override everything else if conflict)
+
+1. **Always export real assets** — PNG/SVG from Figma via `save_screenshots`. NEVER use emoji (💎⚡📚) as icons. NEVER build arrows/chevrons with CSS borderWidth+rotate. NEVER approximate gradients with nested solid-color Views.
+2. **Write a plan BEFORE any code** — Phase 3.1 is mandatory. List components, assets, dependencies, image-vs-programmatic decisions. Do NOT skip.
+3. **Think out loud** — before every non-trivial decision, write a paragraph explaining your reasoning: what options exist, why you chose this one, what trade-offs you considered.
+4. **Research independently** — if the design uses an unfamiliar library, pattern, or visual effect, search the web, read docs, understand the API BEFORE writing code.
+5. **Complex visuals → export as PNG** — if recreating a visual requires >3 positioned elements and has no dynamic content, export it as a single Image. Use touchable overlays for interactivity.
+6. **Decompose & reuse** — extract shared atoms (Badge, IconButton, PlayButton) BEFORE implementing feature components. Never duplicate a visual pattern.
+7. **Install libraries yourself** — don't just inform the user. Run `npm install` + `pod install` directly.
+8. **Verify ruthlessly** — Phase 4 & 6 are mandatory gates. Grep for emojis, check file sizes, audit for duplicates. If verification fails → fix → re-verify. No shortcuts.
+9. **All `save_screenshots` paths MUST be relative** — `src/assets/icons/foo.png` ✅ · `/Users/name/project/src/...` ❌ WILL FAIL.
+
+---
+
 ## FIGMA MCP SERVER: figma-mcp-go
 
 > This skill uses `@vkhanhqui/figma-mcp-go` — a Figma MCP server that reads data
@@ -262,19 +276,30 @@ If unsure whether a library is needed, **install it anyway** — unused imports 
 
 **After installation, the app MUST be rebuilt** (hot reload is not enough for native modules).
 
-### Step 0.3.1 — Research unfamiliar libraries
+### Step 0.3.1 — Research unfamiliar patterns and libraries
 
-If the design requires a library you haven't used before (e.g., `react-native-reanimated`, `@gorhom/bottom-sheet`, `lottie-react-native`):
-1. **Search the web** for the library's API, installation steps, and common patterns
-2. **Read the library's README/docs** to understand the correct import and usage
+If the design uses ANY feature you haven't implemented before — a library, visual effect, animation, or complex layout pattern:
+1. **Search the web** for implementation examples (GitHub, npm docs, Stack Overflow, blog posts)
+2. **Read official docs/README** to understand the correct API and installation
 3. **Check compatibility** with the project's React Native version
 4. **Install + rebuild** before writing any code that depends on it
 5. **Document your reasoning** — explain WHY this library is needed and what alternatives exist
 
-**Think out loud.** Before making any non-trivial decision, describe your thought process:
-- "Figma shows a radial gradient → I need LinearGradient. Let me check if it's installed..."
-- "This section has 5 overlapping shapes → too complex for Views, exporting as PNG..."
-- "Same badge pattern in 3 places → extracting to Badge.tsx first..."
+**This applies to ALL unfamiliar things**, not just libraries:
+- Visual effects: blur, gradient, glow, parallax
+- Complex patterns: radial layouts, overlapping shapes, SVG paths
+- Animation: spring physics, gesture-driven, lottie
+- Unfamiliar RN APIs: LayoutAnimation, Animated, PanResponder
+
+**Think out loud.** Before making ANY non-trivial decision, write a paragraph in your response explaining:
+- What options exist
+- Why you chose this approach
+- What trade-offs you considered
+
+Examples:
+- "Figma shows a radial gradient → LinearGradient only does linear. Options: (A) use LinearGradient with angle approximation, (B) export as PNG. Choosing B because radial can't be approximated accurately."
+- "This section has 5 overlapping shapes → too complex for Views, exporting as PNG with touchable overlays."
+- "Same badge pattern in 3 places → extracting to Badge.tsx first to avoid duplication."
 
 ### Step 0.4 — Detect custom fonts from Figma
 
@@ -531,6 +556,26 @@ If you export a monochrome icon that appears in a different color in the design:
 10. **Simple geometric icons (arrows, chevrons, plus, close)** — ALWAYS export from Figma as PNG. NEVER build them with CSS hacks (borderWidth + transform rotate). The exported PNG is pixel-perfect; the CSS hack is always slightly off.
 11. **Think out loud before EVERY export batch.** List what you're exporting and why:
     - "Exporting 5 tab icons, 2 header icons, 1 arrow, 3 card images — total 11 assets"
+12. **⚠️ REMINDER: `outputPath` MUST be relative** — `src/assets/icons/foo.png` ✅ · `/Users/...` ❌ WILL FAIL
+
+### Step 1.4.2 — Validate exported assets (MANDATORY after every batch)
+
+**Immediately after every `save_screenshots` call**, validate the results:
+
+```bash
+# Find blank/empty PNGs (≤200 bytes = export failed)
+find src/assets -name "*.png" -size -200c -exec ls -la {} \;
+```
+
+**If ANY file is ≤200 bytes:**
+1. The icon is white-on-transparent or the node doesn't render
+2. **Follow the fallback chain immediately** (Step 1.4.1):
+   - Try parent frame → try composite section → try different format
+3. **Do NOT proceed to Phase 3 with blank assets** — every missing icon = visible bug
+
+**Check MCP response for failed items:**
+- `"success": false` → note the nodeId and retry with different approach
+- `bytesWritten: 149` → blank PNG, follow fallback chain
 
 ### Step 1.5 — Get design tokens (ONLY if explicitly requested)
 ```
@@ -686,12 +731,62 @@ const AREAS = [
 
 ### 3.1 Implementation plan (MANDATORY before coding)
 
-> **Write a plan before writing any code.** List:
-> 1. All components to create (atoms → composites → screen)
-> 2. All assets to export from Figma (icons, images, composite sections)
-> 3. Dependencies to install (if any missing from Step 0.3)
-> 4. Which sections use Image export vs programmatic (from 3.0 decision)
-> 5. Shared patterns to extract into reusable atoms
+> **⚠️ STOP. DO NOT WRITE ANY COMPONENT CODE UNTIL THIS PLAN IS COMPLETE.**
+> Skipping this step is the #1 cause of wasted effort (wrong decisions, duplicated code, missing assets).
+
+**Write the plan and output it in your response.** Cover ALL of these:
+1. All components to create (atoms → composites → screen)
+2. All assets to export from Figma (icons, images, composite sections) — list node IDs
+3. Dependencies to install (if any missing from Step 0.3)
+4. Which sections use Image export vs programmatic (from 3.0 decision) — justify each
+5. Shared patterns to extract into reusable atoms
+
+**Example plan output:**
+```
+IMPLEMENTATION PLAN: HomeScreen
+═══════════════════════════════════════
+
+THOUGHT PROCESS:
+- Header has 4 circular icon buttons (2 left, 2 right) → extract IconButton atom
+- Play button appears in FavoriteCard AND LessonCard → extract PlayButton atom
+- "5 min" badge appears in 3 places → extract Badge atom
+- Wheel section has overlapping gradients + flower-of-life pattern → EXPORT AS PNG (too complex for Views)
+- Lesson card has image fill → export image from Figma
+
+ATOMS (create first):
+  src/components/ui/IconButton.tsx — circular button with icon Image
+  src/components/ui/PlayButton.tsx — circle + play triangle
+  src/components/ui/Badge.tsx — pill with text + optional emoji
+
+COMPOSITES:
+  src/components/home/HomeHeader.tsx — uses IconButton × 4
+  src/components/home/FavoriteSection.tsx — uses Badge, PlayButton
+  src/components/home/DaySection.tsx — uses arrow-down.png
+  src/components/home/LessonsSection.tsx — uses Badge, PlayButton, lesson image
+  src/components/home/HomeTabBar.tsx — uses tab icon PNGs
+  src/components/home/AreasOfLifeWheel.tsx — PNG background + touchable overlays
+
+SCREEN:
+  src/screens/HomeScreen.tsx — assembles all composites
+
+ASSETS TO EXPORT (13 total):
+  Icons @3x: tab-search, tab-book, tab-home, tab-save, tab-dna (5)
+  Icons @3x: header-bell, header-chat, header-coin (3)
+  Icons @3x: arrow-down (1)
+  Images @2x: lesson-1, lesson-2 (2)
+  Composite @3x: wheel-bg (1)
+  Reference @2x: HomeScreen_design (1)
+
+IMAGE VS PROGRAMMATIC:
+  Header → PROGRAMMATIC (simple flex layout, interactive buttons)
+  Wheel → IMAGE EXPORT (complex overlapping gradient + pattern)
+  Cards → PROGRAMMATIC (dynamic text + exported images)
+  TabBar → PROGRAMMATIC (active state changes)
+
+DEPENDENCIES: react-native-linear-gradient ✓, react-native-svg ✓
+```
+
+**⚠️ Do NOT proceed to 3.2 until the plan covers ALL 5 items above.**
 
 ### 3.2 Extract shared atoms FIRST
 
