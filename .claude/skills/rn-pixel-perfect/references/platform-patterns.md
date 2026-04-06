@@ -51,12 +51,8 @@ fontFamily: Platform.select({
 
 ## Кастомные шрифты из Figma
 
-Если дизайнер использует кастомный шрифт (Inter, Poppins и т.д.):
+Если дизайнер использует кастомный шрифт (Inter, Poppins, Wix Madefor Display и т.д.):
 ```typescript
-// Убедись что шрифт установлен:
-// - Expo: в app.json → fonts
-// - Bare RN: react-native link / rnpm
-
 fontFamily: Platform.select({
   ios: 'Inter-Regular',     // название из font file
   android: 'Inter-Regular', // обычно одинаково
@@ -68,6 +64,62 @@ fontFamily: Platform.select({
   android: 'Inter-SemiBold',
 }),
 ```
+
+### Установка кастомных шрифтов
+
+#### Expo проекты:
+1. Скачай шрифт (.ttf/.otf) — Google Fonts, сайт бренда, или попроси у дизайнера
+2. Положи в `assets/fonts/`
+3. Вариант А — через плагин (рекомендуется):
+   ```json
+   // app.json / app.config.js
+   {
+     "expo": {
+       "plugins": [
+         ["expo-font", {
+           "fonts": [
+             "./assets/fonts/WixMadeforDisplay-Regular.ttf",
+             "./assets/fonts/WixMadeforDisplay-Medium.ttf",
+             "./assets/fonts/WixMadeforDisplay-SemiBold.ttf",
+             "./assets/fonts/WixMadeforDisplay-Bold.ttf"
+           ]
+         }]
+       ]
+     }
+   }
+   ```
+4. Вариант Б — динамически через `useFonts`:
+   ```typescript
+   import { useFonts } from 'expo-font';
+
+   const [fontsLoaded] = useFonts({
+     'WixMadeforDisplay-Regular': require('./assets/fonts/WixMadeforDisplay-Regular.ttf'),
+     'WixMadeforDisplay-Bold': require('./assets/fonts/WixMadeforDisplay-Bold.ttf'),
+   });
+   if (!fontsLoaded) return null; // splash screen
+   ```
+
+#### Bare React Native проекты:
+1. Положи шрифты в `src/assets/fonts/`
+2. Создай/обнови `react-native.config.js`:
+   ```javascript
+   module.exports = {
+     project: { ios: {}, android: {} },
+     assets: ['./src/assets/fonts/'],
+   };
+   ```
+3. Запусти: `npx react-native-asset`
+4. **Пересобери приложение** — шрифты требуют native rebuild, hot reload недостаточно
+
+#### Если шрифты ещё НЕ установлены:
+Используй системный шрифт как fallback, но **оставь TODO:**
+```typescript
+fontFamily: Platform.select({
+  ios: 'System',      // TODO: Install 'WixMadeforDisplay-Regular'
+  android: 'Roboto',  // TODO: Install 'WixMadeforDisplay-Regular'
+}),
+```
+Скажи пользователю: "Дизайн использует шрифт '{FontName}'. Для точного совпадения нужно установить его: инструкция в platform-patterns.md."
 
 ## Status Bar
 

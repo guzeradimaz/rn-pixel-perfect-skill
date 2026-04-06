@@ -54,6 +54,10 @@ paddingHorizontal: scale(16),
 Если Figma-фрейм НЕ 390pt:
 
 ```typescript
+// Если дизайн под 393pt (iPhone 14 Pro / 15 Pro / 16):
+const BASE_WIDTH = 393;
+// ⚠️ Часто путают с 390! Разница всего 3px, но даёт ~0.8% ошибку по всему экрану.
+
 // Если дизайн под 375pt (iPhone SE, старый стандарт):
 const BASE_WIDTH = 375;
 
@@ -64,7 +68,7 @@ const BASE_WIDTH = 430;
 const BASE_WIDTH = 360;
 ```
 
-Проверяй в get_design_context — там будет ширина фрейма.
+Проверяй в get_design_context — там будет ширина фрейма. Обрати особое внимание на 390 vs 393.
 
 ## Типичные размеры из Figma → RN
 

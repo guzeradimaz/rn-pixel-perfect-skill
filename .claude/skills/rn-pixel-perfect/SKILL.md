@@ -46,7 +46,7 @@ radius.*   → border radii from src/theme/radius.ts
 getShadow  → cross-platform shadows from src/theme/shadows.ts
 ```
 
-**FORBIDDEN:** hardcode px · Tailwind/NativeWind · className · inline styles · hex colors · useSafeAreaInsets omission · scale for letterSpacing/borderWidth/opacity
+**FORBIDDEN:** hardcode px · Tailwind/NativeWind · className · inline styles · hex colors · useSafeAreaInsets omission · scale for letterSpacing/borderWidth/opacity · emoji Text as icon/image placeholders
 
 ---
 
@@ -91,14 +91,24 @@ There are **no rate limits**, but extract maximum data per call to reduce contex
 2. **Fetch child nodes freely if data is incomplete.** Unlike API-based servers, additional calls are free. But avoid unnecessary calls that bloat your context.
 3. **`get_screenshot` — call for root node + any section needed for Phase 5.** Free to call multiple times.
 4. **`get_variable_defs` — call when you need design tokens.** No cost, but only call if colors/typography reference variable names.
-5. **Use `get_selection` when user says "верстай выделенное" / "implement selected".** Gets the currently selected nodes in Figma without needing a node ID.
+5. **Use `get_selection` when user says "верстай выделенное" / "implement selected".** Gets the currently selected nodes in Figma without needing a node ID. **WARNING:** `get_selection` often returns 100K-300K+ characters for complex selections. When this happens:
+   - The response is saved to a temp file. **NEVER** try to Read the entire file at once.
+   - Use `python3` via Bash to parse the JSON and extract data in passes:
+     ```python
+     # Pass 1: tree structure (names, types, bounds, IDs)
+     # Pass 2: text content (scan_text_nodes is often easier)
+     # Pass 3: specific styles (fills, fonts, radii) for extraction map
+     ```
+   - Also call `scan_text_nodes(nodeId)` separately — it returns ALL text in a subtree in a compact format, much easier to work with than parsing the full tree.
 6. **NEVER re-fetch data you already have.** The extraction map from Step 1.2 is your cache. Even without rate limits, re-fetching wastes context.
 7. **Batch your planning.** Before any MCP call, plan what data you need. Make the call and extract all answers at once.
 
 ### Call sequence
 
 ```
-CALL 1: get_design_context(fileKey, rootNodeId)
+CALL 1: get_design_context(fileKey, rootNodeId, dedupe_components: true)
+        → dedupe_components cuts response size 2-5x on screens with repeated components
+        → If response is too large: retry with detail: "compact" for structure, then "full" for specific subtrees
         → Extract EVERYTHING: layout, colors, fonts, spacing, children
         → Fill the complete extraction map
         → Decide: is any section missing?
@@ -231,13 +241,31 @@ Adapt imports to match the project's path alias (`@/`, `~/`, `../`, etc.).
 Check `package.json` for:
 - `react-native-safe-area-context` — REQUIRED (SafeArea insets)
 - `react-native-svg` — needed if Figma has SVG assets
+- `react-native-linear-gradient` (bare RN) or `expo-linear-gradient` (Expo) — for gradient backgrounds
+- `@react-native-community/blur` — for blur/frosted glass effects (optional but common)
 
-If missing, inform the user but do NOT auto-install. Say:
-> "Для корректной работы нужно установить: `npx expo install react-native-safe-area-context`"
+If missing, inform the user what to install but do NOT auto-install. Say:
+> "Для корректной работы нужно установить:"
+> - Bare RN: `npm install react-native-safe-area-context react-native-linear-gradient react-native-svg && cd ios && pod install`
+> - Expo: `npx expo install react-native-safe-area-context expo-linear-gradient react-native-svg`
+
+**After installation, the app MUST be rebuilt** (hot reload is not enough for native modules).
 
 ### Step 0.4 — Detect BASE_WIDTH
 If the project already has `scale.ts`, read the current `BASE_WIDTH`.
 It will be updated in Phase 1 if the Figma frame width differs.
+
+> **Common Figma frame widths:**
+> | Width | Device | Notes |
+> |-------|--------|-------|
+> | `390` | iPhone 14 / 15 | Most common, template default |
+> | `393` | iPhone 14 Pro / 15 Pro / 16 | **Frequently used, easy to confuse with 390** |
+> | `375` | iPhone SE / older models | Legacy designs |
+> | `430` | iPhone Pro Max variants | Large screens |
+> | `360` | Android standard | Common Android baseline |
+>
+> **CRITICAL:** A 390 vs 393 mismatch causes ~0.8% scaling error across the entire screen.
+> Always verify frame width from `get_design_context` response and update `BASE_WIDTH` immediately.
 
 ---
 
@@ -259,9 +287,25 @@ Try both formats if one fails.
 
 ### Step 1.2 — Get design context (THE PRIMARY CALL)
 ```
-get_design_context(fileKey, nodeId)
+get_design_context(fileKey, nodeId, dedupe_components: true)
 ```
 **This is your most important and often ONLY Figma call.** Make it count.
+
+#### MCP parameters for efficient calls:
+| Parameter | When to use | Why |
+|-----------|------------|-----|
+| `dedupe_components: true` | **ALWAYS** (default for this skill) | Repeated component instances are serialized compactly; unique definitions collected once. Cuts response size 2-5x. |
+| `depth: 3` | Default first call | Gets 3 levels deep — enough for most screens |
+| `depth: 5+` | Only if sections are truncated | Deeper trees generate much larger responses |
+| `detail: "compact"` | First pass on complex screens | Returns id/name/type/bounds + fills/strokes only. Use when you need structure first, details later. |
+| `detail: "full"` | Second call for specific sections | Full property data for implementation |
+
+#### Handling large MCP responses:
+MCP responses for real screens often exceed 100K-300K characters. When this happens:
+1. **The response is saved to a temp file** instead of appearing inline. Read the file path from the tool output.
+2. **Parse systematically:** use Python/jq scripts via Bash to extract text nodes, styles, and bounds from the JSON. Do NOT try to read the entire file at once — it will exceed token limits.
+3. **Extract in passes:** first pass = node tree structure (names, types, bounds); second pass = text content and styles; third pass = specific values you need for the extraction map.
+4. **Start with `dedupe_components: true`** — this is the single biggest reduction.
 
 The MCP returns layout, spacing, colors, typography, and component hierarchy.
 The MCP may return React + Tailwind code — **IGNORE the Tailwind classes**, use only raw px values.
@@ -311,6 +355,15 @@ This is your single source of truth and your CACHE — you will NOT re-fetch thi
 - Frame width ≠ 390 → update `BASE_WIDTH` in `scale.ts` BEFORE coding
 - **Track your call count** in the extraction map `figmaCalls` field
 
+#### Handling duplicate/repeated sections in Figma:
+Figma frames may contain **repeated sections** (same card appearing twice, same row duplicated).
+This happens when designers show scroll state or multiple viewport positions.
+
+1. **Check node names:** If two sections share the same component name, they are likely the same component shown in a scroll context. Extract data from ONE instance only.
+2. **Check for differences:** Compare children of duplicate sections. Different text/colors = different states (active vs inactive, expanded vs collapsed).
+3. **When in doubt, ask the user:** "В Figma есть повторяющиеся секции ({names}). Это разные состояния или дубли для показа скролла?"
+4. **For extraction map:** Record unique sections only. Note duplicates as: `"duplicateOf": "SectionName"`.
+
 ### Step 1.3 — Assess: do you need more data?
 
 After filling the extraction map, check:
@@ -341,7 +394,17 @@ use THIS LOCAL FILE — never re-fetch from Figma.
 
 ### Step 1.4.1 — Export icons and images from Figma
 
-> **This is where icons/images get downloaded.** Use the right format for each asset type.
+> **This is where icons/images get downloaded.** Many exports WILL fail on first attempt.
+> Budget 2-3 attempts per icon. Follow the fallback chain below.
+
+#### Step 1.4.1a — Batch icon detection (do this FIRST)
+Before manually searching the Figma tree for icons, use `scan_nodes_by_types`:
+```
+scan_nodes_by_types(nodeId: "{rootNodeId}", types: ["VECTOR", "BOOLEAN_OPERATION", "INSTANCE"])
+```
+This returns ALL vector/icon nodes in the subtree. Filter by name patterns
+(`"icon-"`, `"Interface"`, `"Arrow"`, etc.) to build your export list.
+This saves 10+ minutes vs manual tree inspection.
 
 #### Format rules:
 | Asset type | Format | Scale | Why |
@@ -356,30 +419,75 @@ use THIS LOCAL FILE — never re-fetch from Figma.
 ```
 save_screenshots(items: [
   { nodeId: "1:23", outputPath: "src/assets/icons/home.svg", format: "SVG" },
-  { nodeId: "1:24", outputPath: "src/assets/icons/search.svg", format: "SVG" },
-  { nodeId: "1:25", outputPath: "src/assets/icons/profile.svg", format: "SVG" },
+  { nodeId: "1:24", outputPath: "src/assets/icons/search.png", format: "PNG", scale: 3 },
   { nodeId: "1:30", outputPath: "src/assets/images/hero.png", format: "PNG", scale: 2 }
 ])
 ```
 
-#### Using `get_screenshot` for single export:
+> **CRITICAL: `outputPath` MUST be a relative path** (relative to project root).
+> Absolute paths (starting with `/`) WILL FAIL.
+> ✅ `"src/assets/icons/home.svg"` — correct
+> ❌ `"/Users/name/project/src/assets/icons/home.svg"` — WILL FAIL
+
+#### The white-on-transparent problem (VERY COMMON)
+
+Many Figma icons are **white vectors on transparent backgrounds**. These fail on export:
+- **SVG export:** MCP returns `"Failed to export node. This node may not have any visible layers."`
+- **PNG export:** File is created but is ~149 bytes (completely transparent/empty).
+
+**Detection after every export batch:**
+1. Check file sizes. Any PNG ≤ 200 bytes → export failed (empty/transparent).
+2. SVG error `"no visible layers"` → icon is white-on-transparent.
+
+**Fallback chain (follow in order):**
+
 ```
-get_screenshot(nodeIds: ["1:23"], format: "SVG")
-get_screenshot(nodeIds: ["1:24"], format: "PNG", scale: 3)
+ATTEMPT 1: Export the icon node as SVG
+           → Success? ✓ Done.
+           → "No visible layers" error? → ATTEMPT 2
+
+ATTEMPT 2: Export the icon node as PNG @3x
+           → Check file size. > 200 bytes? ✓ Done.
+           → ≤ 200 bytes (empty)? → ATTEMPT 3
+
+ATTEMPT 3: Export the PARENT FRAME (the container with background)
+           → This captures the icon WITH its background context.
+           → Usually works. Use as composite image in code.
+
+ATTEMPT 4: Export a larger COMPOSITE SECTION as a single image
+           → e.g., entire tab bar, entire header, entire card
+           → Use as a single <Image> in code instead of assembling parts
+```
+
+**After all exports, clean up empty files:**
+```bash
+find src/assets -type f \( -name "*.png" -o -name "*.svg" \) -size 149c -delete
+```
+
+#### Using `tintColor` for monochrome icons:
+If you export a monochrome icon that appears in a different color in the design:
+```typescript
+<Image
+  source={require('@/assets/icons/bell.png')}
+  style={{ width: ms(24), height: ms(24), tintColor: colors.text.primary }}
+  resizeMode="contain"
+/>
 ```
 
 #### Key rules:
-1. **Icons → ALWAYS try SVG first.** SVG renders crisply at any size, no @2x/@3x variants needed.
-2. **If SVG export is broken** (complex effects, rasterized fills) → fallback to PNG with `scale: 3`
-3. **Use `save_screenshots` for batch** — exports multiple assets in one call, saves to disk directly
-4. **File naming:** lowercase, kebab-case: `icon-home.svg`, `img-hero.png`
-5. **Save to correct folders:**
+1. **Icons → try SVG first.** But expect failures on white-on-transparent icons — follow the fallback chain.
+2. **Validate EVERY export:** check file size for PNG (>200 bytes = success), check for error messages for SVG.
+3. **Escalate to parent/composite** when individual icon export fails — do NOT waste time on repeated attempts at the same node level.
+4. **NEVER use emoji characters (💎, 🔔, ⚙️) as icon placeholders.** Always export the real asset. If all fallback attempts fail, use a colored `View` as placeholder and leave a `// TODO: export icon from Figma` comment.
+5. **Use `save_screenshots` for batch** — exports multiple assets in one call, saves to disk directly.
+6. **File naming:** lowercase, kebab-case: `icon-home.svg`, `img-hero.png`
+7. **Save to correct folders:**
    ```
    src/assets/icons/    ← SVG and PNG icons
-   src/assets/images/   ← photos, illustrations
+   src/assets/images/   ← photos, illustrations, composite exports
    src/assets/figma/    ← design reference screenshots (Phase 5 only)
    ```
-6. **Never use Figma image URLs in production code** — always download and use `require()`
+8. **Never use Figma image URLs in production code** — always download and use `require()`
 
 ### Step 1.5 — Get design tokens (ONLY if explicitly requested)
 ```
@@ -466,7 +574,96 @@ Update shadow levels if Figma has specific shadow specs:
 
 ## PHASE 3 — IMPLEMENTATION
 
-### 3.1 Component breakdown
+### 3.0 — Image vs Programmatic decision (BEFORE coding)
+
+> **Make this decision for EVERY section of the screen BEFORE writing any code.**
+> Getting this wrong wastes 15-30 minutes building something that should be an image export.
+
+For each section from the extraction map, classify it:
+
+| Criteria | Decision | Why |
+|----------|----------|-----|
+| Complex decorative element (concentric circles, radial layouts, illustrations) | **EXPORT AS IMAGE** | Programmatic recreation is slow, fragile, and never pixel-matches |
+| Gradient backgrounds with overlapping shapes | **EXPORT AS IMAGE** | LinearGradient + absolute positioning = maintenance nightmare |
+| Static branding artwork or hero sections | **EXPORT AS IMAGE** | No interactivity, image is pixel-perfect by definition |
+| Custom icon compositions (icon + badge + decorative ring) | **EXPORT AS IMAGE** | Export the composite, not individual pieces |
+| Interactive element with state changes (pressed, disabled, active) | **PROGRAMMATIC** | State changes require code |
+| Text content that varies (user name, balance, count) | **PROGRAMMATIC** | Dynamic data cannot be an image |
+| List items / repeating patterns with dynamic data | **PROGRAMMATIC** | FlatList needs rendered components |
+| Standard UI (buttons, inputs, cards with text) | **PROGRAMMATIC** | Simple layout, needs interactivity |
+| Tab bar / navigation with active states | **PROGRAMMATIC** | Active tab changes at runtime |
+
+**Decision shortcut:** If you need >3 absolute-positioned elements to recreate a visual, AND the section has no interactive/dynamic parts — **export it as an image.**
+
+**Real-world examples of EXPORT AS IMAGE:**
+- Circular wheel with gradient + flower-of-life petal pattern + radial labels
+- Hero section with overlapping gradient shapes and decorative ellipses
+- Complex progress indicator with concentric rings and glow effects
+- Onboarding illustration with layered vector artwork
+
+**Composite export:**
+```
+save_screenshots(items: [
+  { nodeId: "frame-id", outputPath: "src/assets/images/hero-section.png", format: "PNG", scale: 3 }
+])
+```
+Then use in code as `<Image source={require('@/assets/images/hero-section.png')} />` with exact Figma dimensions.
+
+**Composite image + touchable overlay pattern (for interactive complex visuals):**
+When a complex visual ALSO needs interactivity (e.g., tappable areas on a wheel/chart):
+1. Export the entire visual as PNG @3x
+2. Use `<Image>` as background
+3. Place invisible `<TouchableOpacity>` zones on top for each interactive area
+4. Position zones using **% of image dimensions** (not absolute px) for scaling
+
+```typescript
+// positions as % of image size, from Figma coordinates
+const AREAS = [
+  { id: 'lifestyle', xPct: 0.48, yPct: 0.32, widthPct: 0.18, heightPct: 0.12 },
+  // ...
+];
+
+<View style={styles.container}>
+  <Image source={require('@/assets/images/wheel.png')} style={styles.image} resizeMode="contain" />
+  {AREAS.map(area => (
+    <TouchableOpacity
+      key={area.id}
+      style={[styles.touchZone, {
+        left: area.xPct * containerWidth - (area.widthPct * containerWidth) / 2,
+        top: area.yPct * containerHeight - (area.heightPct * containerHeight) / 2,
+        width: area.widthPct * containerWidth,
+        height: area.heightPct * containerHeight,
+      }]}
+      onPress={() => onPress(area.id)}
+      activeOpacity={0.6}
+    />
+  ))}
+</View>
+```
+
+### 3.1 Implementation plan (MANDATORY before coding)
+
+> **Write a plan before writing any code.** List:
+> 1. All components to create (atoms → composites → screen)
+> 2. All assets to export from Figma (icons, images, composite sections)
+> 3. Dependencies to install (if any missing from Step 0.3)
+> 4. Which sections use Image export vs programmatic (from 3.0 decision)
+> 5. Shared patterns to extract into reusable atoms
+
+### 3.2 Extract shared atoms FIRST
+
+Scan the extraction map for **repeated visual patterns**. If ANY pattern appears 2+ times across the screen, extract it to `src/components/ui/` BEFORE implementing feature components:
+
+| Pattern | Extract to | Example |
+|---------|-----------|---------|
+| Circular icon button (header, tab bar) | `IconButton.tsx` | 40px circle + icon image |
+| Play/action button (cards, sections) | `PlayButton.tsx` | Circle with triangle/icon |
+| Duration/category badge (cards, lists) | `Badge.tsx` | Pill with text + optional emoji |
+| Chevron/arrow (sections, lists) | Use exported PNG icon | Arrow-down, chevron-right |
+
+**Rule: NEVER implement the same visual pattern twice.** If you copy-paste a StyleSheet block between components, it should be an atom.
+
+### 3.3 Component breakdown
 Before coding, decompose the screen from the extraction map (Phase 1):
 ```
 Screen (layout + SafeArea + data wiring)
@@ -481,7 +678,7 @@ Screen (layout + SafeArea + data wiring)
 Create separate files for each. No monolithic screens.
 Shared UI atoms go to `src/components/ui/`. Feature-specific components go to `src/components/{feature}/`.
 
-### 3.1.1 Implementation order (CRITICAL for accuracy)
+### 3.3.1 Implementation order (CRITICAL for accuracy)
 **Implement bottom-up: atoms first, then composites, then screen.**
 
 1. **UI atoms** — smallest pieces (Button, Badge, Avatar, Icon)
@@ -497,7 +694,7 @@ For each component:
 **Why bottom-up?** Top-down causes "layout drift" — small errors in parent padding
 compound with child spacing, making everything off by 4-8px by the bottom of the screen.
 
-### 3.2 Figma → RN conversion table
+### 3.4 Figma → RN conversion table
 
 | Figma property | React Native | Scale function |
 |----------------|-------------|----------------|
@@ -524,7 +721,7 @@ compound with child spacing, making everything off by 4-8px by the bottom of the
 | `hug content` | omit width/height | let content define |
 | `fixed width/height` | `width: scale(n)` / `height: vs(n)` | explicitly set |
 
-### 3.3 Screen template
+### 3.5 Screen template
 ```typescript
 import React from 'react';
 import { ScrollView, StyleSheet, View } from 'react-native';
@@ -568,7 +765,7 @@ const styles = StyleSheet.create({
 });
 ```
 
-### 3.4 FlatList screen template
+### 3.6 FlatList screen template
 ```typescript
 import React from 'react';
 import { FlatList, StyleSheet, View } from 'react-native';
@@ -629,7 +826,7 @@ const styles = StyleSheet.create({
 });
 ```
 
-### 3.5 Component template
+### 3.7 Component template
 ```typescript
 import React from 'react';
 import { StyleSheet, Text, TouchableOpacity } from 'react-native';
@@ -693,7 +890,7 @@ const styles = StyleSheet.create({
 });
 ```
 
-### 3.6 TextInput template
+### 3.8 TextInput template
 ```typescript
 import React, { useState } from 'react';
 import { StyleSheet, TextInput as RNTextInput, View, Text } from 'react-native';
@@ -770,7 +967,7 @@ const styles = StyleSheet.create({
 });
 ```
 
-### 3.7 Shadow pattern (cross-platform)
+### 3.9 Shadow pattern (cross-platform)
 ```typescript
 import { getShadow } from '@/theme/shadows';
 
@@ -781,7 +978,7 @@ card: {
 }
 ```
 
-### 3.8 Font pattern (cross-platform)
+### 3.10 Font pattern (cross-platform)
 ```typescript
 // Option A — use typography spread (preferred):
 text: {
@@ -802,7 +999,7 @@ text: {
 }
 ```
 
-### 3.9 Using Figma assets in code
+### 3.11 Using Figma assets in code
 
 **SVG icons (preferred):**
 ```typescript
@@ -887,6 +1084,14 @@ Common errors this catches:
 - `scale()` applied to letterSpacing or borderWidth
 - Value "guessed" instead of taken from extraction map
 
+#### Efficient verification for complex screens (50+ style values):
+When a screen has many components, a full table for every value is unwieldy. **Prioritize:**
+1. **HIGH (verify every value):** colors, fontSize, fontWeight, borderRadius, padding/margin — most visually impactful, most commonly wrong.
+2. **MEDIUM (spot-check 50%):** gap, lineHeight, letterSpacing — verify for key components, sample-check the rest.
+3. **LOW (structure check):** flex, alignItems, justifyContent — verify layout direction is correct.
+
+Output full table for HIGH. For MEDIUM/LOW: `"Spot-checked 5/12 gap values — all match ✓"`
+
 ### 4.2 — Structure check
 Verify these without a table — quick pass:
 
@@ -949,20 +1154,39 @@ CODE AUDIT: {ScreenName}
 - Simulator MCP (`mobile-mcp` or `ios-simulator`) is connected
 
 ### 5.1 — Navigate to the screen
-Use simulator MCP tools to navigate to the implemented screen:
+Use simulator MCP tools to navigate to the implemented screen.
+
+> **Tool names vary by MCP server.** Check which tools are available at runtime.
+
+| Action | `ios-simulator` MCP | `mobile-mcp` MCP |
+|--------|---------------------|-------------------|
+| Launch app | `launch_app(bundle_id)` | `mobile_launch_app(bundle_id)` |
+| Tap | `ui_tap(x, y)` | `mobile_click_on_screen_at_coordinates(x, y)` |
+| Swipe/Scroll | `ui_swipe(x_start, y_start, x_end, y_end, duration)` | `mobile_swipe_on_screen(direction, ...)` |
+| Screenshot | `screenshot(output_path)` | `mobile_take_screenshot()` |
+
+**Scrolling to verify below-the-fold content:**
 ```
-mobile_launch_app(bundle_id)              ← launch the app
-mobile_click_on_screen_at_coordinates(x, y)  ← tap to navigate if needed
-mobile_swipe_on_screen(...)              ← scroll if needed
+// Swipe up to scroll content down (ios-simulator MCP):
+ui_swipe(x_start: 195, y_start: 600, x_end: 195, y_end: 200, duration: "0.5")
 ```
+After scrolling, take a new screenshot and compare the bottom sections against the Figma design.
+Repeat scroll + screenshot until ALL screen sections are verified.
+
+**If swipe tool fails** (e.g., `idb` not installed):
+- Fallback: `xcrun simctl io booted screenshot /tmp/screen.png` for screenshots
+- For scrolling: use `osascript` to send scroll events to Simulator app, or ask user to scroll manually
 
 ### 5.2 — Take simulator screenshot
 ```
-mobile_take_screenshot() or screenshot(output_path)
-```
-Save to a TEMPORARY local path:
-```
-/tmp/{ScreenName}_simulator_{iteration}.png
+// ios-simulator MCP:
+screenshot(output_path: "/tmp/{ScreenName}_simulator_{iteration}.png")
+
+// mobile-mcp:
+mobile_take_screenshot()
+
+// Fallback (no MCP):
+xcrun simctl io booted screenshot /tmp/{ScreenName}_simulator_{iteration}.png
 ```
 **This costs ZERO Figma API calls** — it's a local simulator operation.
 
@@ -1089,8 +1313,12 @@ REQUIREMENTS CHECK
 │ 18 │ scale() for horizontal, vs() for vertical       │ ✓ / ✗  │
 │ 19 │ ms() only for fontSize/lineHeight/iconSize      │ ✓ / ✗  │
 │ 20 │ TypeScript — no `any`, proper types              │ ✓ / ✗  │
+│ 21 │ No emoji chars (💎⚡📚) as UI icon placeholders │ ✓ / ✗  │
+│ 22 │ Complex visuals use Image export (not Views)    │ ✓ / ✗  │
+│ 23 │ Shared patterns extracted (no duplicate atoms)  │ ✓ / ✗  │
+│ 24 │ Required visual libs installed (gradient, svg)  │ ✓ / ✗  │
 ├────┼─────────────────────────────────────────────────┼────────┤
-│    │ TOTAL                                           │ __/20  │
+│    │ TOTAL                                           │ __/24  │
 └────┴─────────────────────────────────────────────────┴────────┘
 ```
 
@@ -1116,6 +1344,14 @@ VALUE ACCURACY: {ScreenName}
 ```
 
 **If any file < 100% → list the mismatched values → fix → re-check.**
+
+#### Efficient re-check for complex screens:
+For screens with 80+ values, re-reading every file line-by-line is slow.
+**Focused re-check strategy:**
+1. Re-read ONLY files that were modified during Phase 4/5 fix cycles.
+2. For unchanged files, reference the Phase 4 verification table (already confirmed ✓).
+3. Focus the re-check on: (a) values that were fixed, (b) values adjacent to fixes (easy to accidentally break).
+4. If Phase 4 table showed 100% and no fixes were made → skip this file in re-check.
 
 ### 6.3 — Visual match confirmation
 
@@ -1147,7 +1383,7 @@ VALUE ACCURACY: {ScreenName}
 ### 6.5 — Gate verdict
 
 **ALL of these must be true to pass:**
-- [ ] 6.1 Requirements: 20/20 ✓
+- [ ] 6.1 Requirements: 24/24 ✓
 - [ ] 6.2 Value accuracy: 100% across all files
 - [ ] 6.3 Visual match: ≥ 99.9% (or manual confirmation if no simulator)
 - [ ] 6.4 Figma re-fetch: no mismatches (or skipped with reason)
@@ -1155,7 +1391,7 @@ VALUE ACCURACY: {ScreenName}
 ```
 FINAL VERDICT: {ScreenName}
 ═══════════════════════════════════════════════════
-│ Requirements:     20/20 ✓                       │
+│ Requirements:     24/24 ✓                       │
 │ Value accuracy:   88/88 (100%) ✓                │
 │ Visual match:     99.9%+ ✓                      │
 │ Figma re-fetch:   5/5 values confirmed ✓        │
@@ -1219,6 +1455,32 @@ borderWidth: scale(1)  // fractional border = visual artifacts
 
 // ❌ ms() for spacing
 paddingHorizontal: ms(16)  // ms is for fonts, use scale()
+
+// ❌ Emoji as icon/image placeholders
+<Text style={styles.icon}>{'💎'}</Text>   // renders differently per OS, not pixel-perfect
+<Text style={styles.icon}>{'🔔'}</Text>   // NEVER — always export the real icon from Figma
+
+// ✅ Export from Figma and use Image
+<Image source={require('@/assets/icons/diamond.png')} style={styles.icon} resizeMode="contain" />
+
+// ❌ Reconstructing complex visuals with nested Views
+<View style={styles.outerCircle}>           // NEVER recreate complex gradients,
+  <View style={styles.middleCircle}>        // overlapping shapes, or SVG-like
+    <View style={styles.innerCircle} />     // patterns with nested Views.
+  </View>                                   // Export as PNG instead.
+</View>
+
+// ✅ Export complex visual and use Image + touchable overlays
+<Image source={require('@/assets/images/wheel.png')} style={styles.wheel} />
+
+// ❌ Duplicating visual patterns across components
+// PlayButton CSS triangle copy-pasted in FavoriteSection.tsx AND LessonsSection.tsx
+// ✅ Extract to src/components/ui/PlayButton.tsx and import everywhere
+
+// ❌ Using Image without explicit dimensions
+<Image source={require('./hero.png')} />  // WILL NOT RENDER — needs width + height
+// ✅ Always set dimensions
+<Image source={require('./hero.png')} style={{ width: scale(321), height: vs(200) }} />
 ```
 
 ---
