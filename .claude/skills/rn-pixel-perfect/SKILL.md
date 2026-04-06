@@ -237,21 +237,60 @@ Adapt imports to match the project's path alias (`@/`, `~/`, `../`, etc.).
 - Update all template imports accordingly
 - Check `tsconfig.json` → `paths` or `babel.config.js` → `module-resolver` for the alias
 
-### Step 0.3 — Verify dependencies
-Check `package.json` for:
-- `react-native-safe-area-context` — REQUIRED (SafeArea insets)
-- `react-native-svg` — needed if Figma has SVG assets
-- `react-native-linear-gradient` (bare RN) or `expo-linear-gradient` (Expo) — for gradient backgrounds
-- `@react-native-community/blur` — for blur/frosted glass effects (optional but common)
+### Step 0.3 — Install dependencies
 
-If missing, inform the user what to install but do NOT auto-install. Say:
-> "Для корректной работы нужно установить:"
-> - Bare RN: `npm install react-native-safe-area-context react-native-linear-gradient react-native-svg && cd ios && pod install`
-> - Expo: `npx expo install react-native-safe-area-context expo-linear-gradient react-native-svg`
+Check `package.json` and **install missing dependencies automatically:**
+
+| Library | Required | Bare RN package | Expo package |
+|---------|----------|----------------|--------------|
+| `react-native-safe-area-context` | **ALWAYS** | same | same |
+| `react-native-svg` | **ALWAYS** | same | same |
+| `react-native-linear-gradient` | **ALWAYS** | `react-native-linear-gradient` | `expo-linear-gradient` |
+| `@react-native-community/blur` | If design has blur/frosted glass | same | `expo-blur` |
+
+**Install automatically** — do NOT just inform the user. Run:
+```bash
+# Bare RN:
+npm install react-native-safe-area-context react-native-svg react-native-linear-gradient
+cd ios && pod install && cd ..
+
+# Expo:
+npx expo install react-native-safe-area-context react-native-svg expo-linear-gradient
+```
+
+If unsure whether a library is needed, **install it anyway** — unused imports have zero runtime cost, but missing libraries cause crashes that waste 10+ minutes on rebuild cycles.
 
 **After installation, the app MUST be rebuilt** (hot reload is not enough for native modules).
 
-### Step 0.4 — Detect BASE_WIDTH
+### Step 0.3.1 — Research unfamiliar libraries
+
+If the design requires a library you haven't used before (e.g., `react-native-reanimated`, `@gorhom/bottom-sheet`, `lottie-react-native`):
+1. **Search the web** for the library's API, installation steps, and common patterns
+2. **Read the library's README/docs** to understand the correct import and usage
+3. **Check compatibility** with the project's React Native version
+4. **Install + rebuild** before writing any code that depends on it
+5. **Document your reasoning** — explain WHY this library is needed and what alternatives exist
+
+**Think out loud.** Before making any non-trivial decision, describe your thought process:
+- "Figma shows a radial gradient → I need LinearGradient. Let me check if it's installed..."
+- "This section has 5 overlapping shapes → too complex for Views, exporting as PNG..."
+- "Same badge pattern in 3 places → extracting to Badge.tsx first..."
+
+### Step 0.4 — Detect custom fonts from Figma
+
+After Phase 1 reconnaissance, check `fontFamily` values in the extraction map.
+If the design uses a custom font (not system SF Pro / Roboto):
+
+1. **Identify the font** from Figma text styles (e.g., "Wix Madefor Display", "Inter", "Poppins")
+2. **Check if already installed:** look for `.ttf`/`.otf` files in `src/assets/fonts/` or `assets/fonts/`
+3. **If NOT installed:**
+   - Tell user: "Дизайн использует шрифт '{FontName}'. Для точного совпадения нужно установить:"
+   - **Bare RN:** Download .ttf files → `src/assets/fonts/` → create `react-native.config.js` with `assets: ['./src/assets/fonts/']` → run `npx react-native-asset` → **rebuild**
+   - **Expo:** Download .ttf files → `assets/fonts/` → use `expo-font` plugin in `app.json` or `useFonts()` hook
+   - Read `references/platform-patterns.md` for detailed installation steps
+4. **Use font name in code immediately** (with Platform.select). Even if font isn't installed yet, the code should reference it — system fallback will render until font is added.
+
+### Step 0.5 — Detect BASE_WIDTH
 If the project already has `scale.ts`, read the current `BASE_WIDTH`.
 It will be updated in Phase 1 if the Figma frame width differs.
 
@@ -488,6 +527,10 @@ If you export a monochrome icon that appears in a different color in the design:
    src/assets/figma/    ← design reference screenshots (Phase 5 only)
    ```
 8. **Never use Figma image URLs in production code** — always download and use `require()`
+9. **RECTANGLE nodes with image fills** (photos in cards, hero images) — ALWAYS export as PNG @2x. These are real images, not decorative. If the node name contains "image", "photo", "hero", "illustration" — export it.
+10. **Simple geometric icons (arrows, chevrons, plus, close)** — ALWAYS export from Figma as PNG. NEVER build them with CSS hacks (borderWidth + transform rotate). The exported PNG is pixel-perfect; the CSS hack is always slightly off.
+11. **Think out loud before EVERY export batch.** List what you're exporting and why:
+    - "Exporting 5 tab icons, 2 header icons, 1 arrow, 3 card images — total 11 assets"
 
 ### Step 1.5 — Get design tokens (ONLY if explicitly requested)
 ```
@@ -1092,7 +1135,25 @@ When a screen has many components, a full table for every value is unwieldy. **P
 
 Output full table for HIGH. For MEDIUM/LOW: `"Spot-checked 5/12 gap values — all match ✓"`
 
-### 4.2 — Structure check
+### 4.2 — Asset & pattern audit (BEFORE structure check)
+
+**Emoji audit** — search ALL generated files for emoji characters used as icons:
+```bash
+grep -rn '[\x{1F300}-\x{1F9FF}]' src/components/ src/screens/ | grep -v '\.test\.'
+```
+For each emoji found, ask: **"Is this emoji present in the Figma TEXT node?"**
+- YES (Figma shows real emoji in text, e.g., 🌤️ in a section header) → KEEP
+- NO (used as icon placeholder for a vector icon, e.g., ⚡ for thunder icon) → **REPLACE with exported PNG**
+
+**CSS shape audit** — search for border-based shape hacks:
+- `transform: [{ rotate:` in icon/arrow context → should be exported PNG
+- Nested Views creating circles/shapes → should be Image export (see 3.0)
+
+**Duplicate pattern audit** — check if any StyleSheet block is copy-pasted across files:
+- Same `playButton` + `playTriangle` in 2+ files → extract to `PlayButton.tsx`
+- Same `badge` / `durationBadge` pattern → extract to `Badge.tsx`
+
+### 4.3 — Structure check
 Verify these without a table — quick pass:
 
 - [ ] Every screen uses `useSafeAreaInsets()` (no hardcoded notch)
@@ -1104,6 +1165,8 @@ Verify these without a table — quick pass:
 - [ ] `showsVerticalScrollIndicator={false}` on ScrollView/FlatList
 - [ ] `keyExtractor` on every FlatList (not array index)
 - [ ] `placeholderTextColor` on every TextInput
+- [ ] All `<Image>` have explicit `width` + `height` (no unsized images)
+- [ ] No CSS hacks for icons (border+rotate chevrons, triangle play buttons)
 
 ### 4.3 — Add DebugOverlay
 ```typescript
@@ -1459,6 +1522,11 @@ paddingHorizontal: ms(16)  // ms is for fonts, use scale()
 // ❌ Emoji as icon/image placeholders
 <Text style={styles.icon}>{'💎'}</Text>   // renders differently per OS, not pixel-perfect
 <Text style={styles.icon}>{'🔔'}</Text>   // NEVER — always export the real icon from Figma
+// Exception: emojis that ARE real emojis in Figma text nodes (🌤️☀️🌙 in section headers) → KEEP
+
+// ❌ CSS hacks for arrows/chevrons/geometric icons
+<View style={{ borderRightWidth: 2, borderBottomWidth: 2,
+  transform: [{ rotate: '45deg' }] }} />   // NEVER — export the arrow PNG from Figma
 
 // ✅ Export from Figma and use Image
 <Image source={require('@/assets/icons/diamond.png')} style={styles.icon} resizeMode="contain" />
