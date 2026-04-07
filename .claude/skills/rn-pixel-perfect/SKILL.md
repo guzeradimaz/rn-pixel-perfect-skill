@@ -380,6 +380,8 @@ The MCP may return React + Tailwind code — **IGNORE Tailwind classes entirely*
 - Ambiguous value → infer from context (parent padding, siblings) — do NOT re-call MCP
 - Truly missing critical values → mark `"INCOMPLETE"` — these are the ONLY reason for another call
 - Frame width ≠ current `BASE_WIDTH` → update `scale.ts` BEFORE coding
+- **`visible: false` → SKIP entirely.** Do not add to extraction map, do not render. Hidden layers in Figma = do not exist in code.
+- **`opacity: 0` → SKIP.** Invisible layer, same rule. Exception: if opacity is animated (check layer name for "skeleton", "loading", "placeholder" hints — then render with `opacity: 0` as initial state).
 
 **Shadow extraction** — from `effects[]` array in the node:
 ```
@@ -1218,6 +1220,7 @@ For each emoji: is it present in the Figma TEXT node?
 - [ ] All `<Image>` have explicit `width` + `height`
 - [ ] No emoji icon placeholders
 - [ ] No CSS hacks for geometric icons
+- [ ] No hidden Figma layers rendered (`visible: false` → absent from code, `opacity: 0` → absent unless animated)
 
 ### 4.4 — Add DebugOverlay
 ```typescript
