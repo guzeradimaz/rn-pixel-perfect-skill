@@ -244,11 +244,11 @@ import { FlatList, SectionList } from 'react-native';
   keyExtractor={(item) => item.id}
   contentContainerStyle={{
     paddingHorizontal: scale(16),
-    paddingTop: vs(16),
-    paddingBottom: insets.bottom + vs(16),
+    paddingTop: scale(16),
+    paddingBottom: insets.bottom + scale(16),
   }}
   showsVerticalScrollIndicator={false}
-  ItemSeparatorComponent={() => <View style={{ height: vs(12) }} />}
+  ItemSeparatorComponent={() => <View style={{ height: scale(12) }} />}
 />
 
 // SectionList — для сгруппированных списков (секции с заголовками)
@@ -317,6 +317,23 @@ modalContent: {
 // Не пытайся реализовать сложный bottom sheet вручную
 ```
 
+## Допустимые расхождения (не считать за баги в Phase 5)
+
+Эти расхождения являются нормой и не должны учитываться при подсчёте % матча:
+
+| Источник расхождения | Описание | Допустимо |
+|---------------------|----------|-----------|
+| Сглаживание шрифта | Figma рендерит через Electron/web, iOS через CoreText — разная субпиксельная обработка | ≤1px |
+| Тени | Figma CSS box-shadow vs iOS shadowRadius — iOS чуть мягче по краям | видимо, но норма |
+| Blur-фильтры | Figma blur ≠ `@react-native-community/blur` — разные алгоритмы | видимо, но норма |
+| Emoji | Размер emoji-глифов отличается между платформами | ±2-4px |
+| Status bar | В Figma нарисована условно, на устройстве — системная | пропускать |
+| Системные хром-элементы | Нативный индикатор Home, системные кнопки | пропускать |
+| Placeholder text | Симулятор показывает реальный placeholder | не ошибка |
+| Время/батарея в статусбаре | Разные значения | пропускать |
+
+При подсчёте % совпадения через pixel-diff скрипт — кропай status bar область (верхние ~50px) из обоих изображений перед сравнением.
+
 ## Animations
 
 ```typescript
@@ -338,20 +355,84 @@ opacity.value = withTiming(1, { duration: 300 });
 
 ## Gradient
 
+### Извлечение из Figma MCP
+
+`get_design_context` возвращает градиентные fills в поле `fills[]`:
+
+```json
+{
+  "type": "GRADIENT_LINEAR",
+  "gradientHandlePositions": [
+    { "x": 0.0, "y": 0.5 },
+    { "x": 1.0, "y": 0.5 },
+    { "x": 0.0, "y": 0.0 }
+  ],
+  "gradientStops": [
+    { "color": { "r": 0.22, "g": 0.44, "b": 0.88, "a": 1.0 }, "position": 0.0 },
+    { "color": { "r": 0.11, "g": 0.66, "b": 0.99, "a": 1.0 }, "position": 1.0 }
+  ]
+}
+```
+
+**Конвертация:**
+
+1. **Цвета** (r/g/b — float 0–1 → hex):
+```python
+# r=0.22, g=0.44, b=0.88, a=1.0
+hex_color = f"#{int(r*255):02X}{int(g*255):02X}{int(b*255):02X}"
+# → "#3870E0"
+
+# Если alpha < 1: используй rgba()
+rgba_color = f"rgba({int(r*255)},{int(g*255)},{int(b*255)},{a:.2f})"
+```
+
+2. **Направление** из `gradientHandlePositions`:
+```
+handle[0] = start point { x, y } (значения 0–1 от ширины/высоты элемента)
+handle[1] = end point   { x, y }
+
+→ start = { x: handle[0].x, y: handle[0].y }
+→ end   = { x: handle[1].x, y: handle[1].y }
+
+Горизонтальный (→): start={x:0,y:0.5} end={x:1,y:0.5}
+Вертикальный (↓):   start={x:0.5,y:0} end={x:0.5,y:1}
+Диагональный (↘):   start={x:0,y:0}   end={x:1,y:1}
+```
+
+3. **Stops positions** из `gradientStops[].position` (уже 0–1, использовать напрямую)
+
+### Код
+
 ```typescript
-// React Native не имеет встроенных градиентов
-// Используй expo-linear-gradient или react-native-linear-gradient
-
 import { LinearGradient } from 'expo-linear-gradient';
+// или: import LinearGradient from 'react-native-linear-gradient';
 
+// Пример: горизонтальный градиент из Figma
 <LinearGradient
-  colors={[colors.primary.default, colors.primary.pressed]}
-  start={{ x: 0, y: 0 }}
-  end={{ x: 1, y: 0 }}
-  style={styles.gradientButton}
+  colors={['#3870E0', '#1CAAFE']}           // из gradientStops[].color
+  locations={[0, 1]}                         // из gradientStops[].position
+  start={{ x: 0, y: 0.5 }}                  // из gradientHandlePositions[0]
+  end={{ x: 1, y: 0.5 }}                    // из gradientHandlePositions[1]
+  style={[styles.gradient, { borderRadius: scale(12) }]}
 >
-  <Text style={styles.buttonText}>Button</Text>
+  {/* контент поверх градиента */}
 </LinearGradient>
 
-// Стиль для градиента — те же правила: scale/vs, borderRadius через scale
+// Вертикальный с прозрачным fade:
+<LinearGradient
+  colors={['rgba(0,0,0,0)', 'rgba(0,0,0,0.6)']}
+  locations={[0, 1]}
+  start={{ x: 0, y: 0 }}
+  end={{ x: 0, y: 1 }}
+  style={StyleSheet.absoluteFillObject}      // overlay поверх Image
+/>
 ```
+
+### Правила:
+- НИКОГДА не хардкодить hex в colors — записывать в `colors.*` токены или inline const над компонентом
+- `borderRadius` на LinearGradient работает только с `overflow: 'hidden'` на обёртке или прямо на LinearGradient
+- Для сложных multi-stop радиальных градиентов (3+ stops, radial) → экспортировать PNG из Figma
+
+### Radial gradient
+`react-native-linear-gradient` не поддерживает radial. Если в Figma `GRADIENT_RADIAL`:
+→ экспортировать элемент как PNG через `save_screenshots`

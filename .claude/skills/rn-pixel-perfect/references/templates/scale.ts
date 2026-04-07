@@ -1,4 +1,4 @@
-import { Dimensions } from 'react-native';
+import { Dimensions, PixelRatio } from 'react-native';
 
 const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
 
@@ -7,23 +7,27 @@ const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
 const BASE_WIDTH = 390;
 const BASE_HEIGHT = 844;
 
+// Round to nearest device pixel — eliminates subpixel accumulation errors
+const r = PixelRatio.roundToNearestPixel;
+
 /**
  * Horizontal scale — width, paddingHorizontal, marginHorizontal, borderRadius, gap
  */
 export const scale = (size: number): number =>
-  (size * SCREEN_WIDTH) / BASE_WIDTH;
+  r((size * SCREEN_WIDTH) / BASE_WIDTH);
 
 /**
- * Vertical scale — height, paddingVertical, marginVertical, top, bottom
+ * Vertical scale — ONLY for fixed-height blocks: Header, TabBar, Hero, non-scrollable layouts.
+ * Do NOT use for vertical spacing inside ScrollView/FlatList — use scale() there.
  */
 export const vs = (size: number): number =>
-  (size * SCREEN_HEIGHT) / BASE_HEIGHT;
+  r((size * SCREEN_HEIGHT) / BASE_HEIGHT);
 
 /**
- * Moderate scale — fontSize, lineHeight, icon sizes
+ * Moderate scale — fontSize, lineHeight, icon sizes only
  * Factor 0.5 = halfway between no scaling and full horizontal scaling
  */
 export const ms = (size: number, factor: number = 0.5): number =>
-  size + (scale(size) - size) * factor;
+  r(size + (scale(size) - size) * factor);
 
 export { SCREEN_WIDTH, SCREEN_HEIGHT, BASE_WIDTH, BASE_HEIGHT };

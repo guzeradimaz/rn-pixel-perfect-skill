@@ -18,8 +18,10 @@ Outputs pure `StyleSheet.create({})` with `scale()`, `vs()`, `ms()`, theme token
 **NO Tailwind. NO NativeWind. NO hardcoded values.**
 
 ### Reference files (read when needed)
-- `references/scale-guide.md` — edge cases for scale()/vs()/ms()
-- `references/platform-patterns.md` — shadows, fonts, SafeArea, FlatList, Modal, animations
+- `references/scale-guide.md` — scale()/vs()/ms() rules, vs() scope, lineHeight from Figma
+- `references/platform-patterns.md` — shadows, fonts, SafeArea, FlatList, Modal, animations, acceptable diffs
+- `references/pixel-diff.md` — pixel comparison script instructions (Phase 5)
+- `references/pixel-diff.py` — runnable pixel diff script (Phase 5)
 
 Search for these in `{projectRoot}/.claude/skills/rn-pixel-perfect/references/` or `~/.claude/skills/rn-pixel-perfect/references/`.
 
@@ -36,7 +38,8 @@ typography → font presets from src/theme/typography.ts
 spacing.*  → horizontal spacing tokens
 vSpacing.* → vertical spacing tokens
 radius.*   → border radii tokens
-getShadow  → cross-platform shadows from src/theme/shadows.ts
+getShadow(token)    → preset shadow from src/theme/shadows.ts (tokens updated from Figma in Phase 2)
+createShadow({...}) → exact shadow from Figma values: blur, offsetY, offsetX, opacity, color
 ```
 
 **NEVER:** hardcode px · Tailwind/NativeWind · className · inline styles · hex colors ·
@@ -50,7 +53,7 @@ emoji as icon/image placeholders · CSS hacks for arrows/chevrons
 1. **Export real assets** — PNG/SVG from Figma via `save_screenshots`. NEVER emoji (💎⚡📚) as icons. NEVER CSS border+rotate for arrows.
 2. **Plan before code** — Phase 3.1 is mandatory. List components, assets, decisions. Do NOT skip.
 3. **Think out loud** — before every non-trivial decision, write a paragraph: what options exist, why you chose this, what trade-offs.
-4. **Complex visuals → export as PNG** — if recreating requires >3 positioned elements and has no dynamic content, export as Image.
+4. **Programmatic first, PNG last resort** — DEFAULT is ALWAYS programmatic. PNG only when RN literally cannot render it: blend modes (Multiply/Screen/Overlay), radial gradients, raster illustrations. Linear gradients → always `LinearGradient`. Absolute layouts → `position: 'absolute'`. Icon+badge → `View` overlay. NEVER convert standard UI to PNG just because it has >3 elements.
 5. **Decompose & reuse** — extract shared atoms (Badge, IconButton, PlayButton) BEFORE feature components. Never duplicate a pattern.
 6. **Install libraries yourself** — run `npm install` + `pod install` directly. Don't just inform the user.
 7. **Verify ruthlessly** — Phase 4 & 6 are mandatory gates. If verification fails → fix → re-verify.
@@ -207,7 +210,7 @@ src/theme/index.ts
 For every missing file, copy from `references/templates/` (skill directory).
 Adapt imports to match the project's path alias (`@/`, `~/`, `../` — check `tsconfig.json → paths`).
 
-### Step 0.3 — Install dependencies
+### Step 0.3 — Install base dependencies
 
 Check `package.json` and **install missing deps automatically — don't just inform the user:**
 
@@ -228,6 +231,41 @@ npx expo install react-native-safe-area-context react-native-svg expo-linear-gra
 ```
 
 **App MUST be rebuilt after installing native modules** (hot reload is not enough).
+
+#### SVG transformer (required to use .svg files in RN):
+
+After installing `react-native-svg`, configure the metro transformer once:
+
+```bash
+npm install --save-dev react-native-svg-transformer
+```
+
+`metro.config.js`:
+```javascript
+const { getDefaultConfig } = require('metro-config');
+module.exports = (async () => {
+  const { resolver: { sourceExts, assetExts } } = await getDefaultConfig();
+  return {
+    transformer: { babelTransformerPath: require.resolve('react-native-svg-transformer') },
+    resolver: {
+      assetExts: assetExts.filter(ext => ext !== 'svg'),
+      sourceExts: [...sourceExts, 'svg'],
+    },
+  };
+})();
+```
+
+`declarations.d.ts` (or `@types`):
+```typescript
+declare module '*.svg' {
+  import React from 'react';
+  import { SvgProps } from 'react-native-svg';
+  const content: React.FC<SvgProps>;
+  export default content;
+}
+```
+
+Check if `metro.config.js` already has SVG transformer — if yes, skip. Rebuild required after this change.
 
 ### Step 0.3.1 — Research unfamiliar patterns
 
@@ -292,6 +330,13 @@ get_design_context(fileKey, nodeId, dedupe_components: true)
 | `detail: "compact"` | First pass on complex screens |
 | `detail: "full"` | Second call for specific sections |
 
+> ⚠️ **dedupe_components drops variant states.** After the main call, re-fetch all interactive components
+> (TabBar, Button, Toggle, Checkbox, Selector, any component with active/pressed/disabled states):
+> ```
+> get_design_context(fileKey, componentNodeId, dedupe_components: false)
+> ```
+> This is the only way to get active/inactive colors, pressed styles, and disabled states correctly.
+
 The MCP may return React + Tailwind code — **IGNORE Tailwind classes entirely**, use only raw px values.
 
 **Write the COMPLETE extraction map immediately after the response:**
@@ -319,7 +364,11 @@ The MCP may return React + Tailwind code — **IGNORE Tailwind classes entirely*
       },
       "colors": { "background": "#FFFFFF", "text": "#000000" },
       "radius": 0,
-      "shadow": null,
+      "shadow": {
+        "blur": 20, "offsetX": 0, "offsetY": 8,
+        "opacity": 0.08, "color": "#1B1F2A"
+      },
+      "gradient": null,
       "children": ["BackButton", "Title", "ActionButton"]
     }
   ]
@@ -332,9 +381,38 @@ The MCP may return React + Tailwind code — **IGNORE Tailwind classes entirely*
 - Truly missing critical values → mark `"INCOMPLETE"` — these are the ONLY reason for another call
 - Frame width ≠ current `BASE_WIDTH` → update `scale.ts` BEFORE coding
 
+**Shadow extraction** — from `effects[]` array in the node:
+```
+type: "DROP_SHADOW" → extract: blur, offset.x, offset.y, color {r,g,b,a}, opacity
+color: r/g/b values are 0–1 floats → convert to hex: #RRGGBB
+opacity: use color.a OR effect.opacity (whichever is present)
+```
+Record in extraction map as: `"shadow": { "blur": 20, "offsetY": 8, "offsetX": 0, "opacity": 0.08, "color": "#1B1F2A" }`
+
+**Gradient extraction** — from `fills[]` array when `type: "GRADIENT_LINEAR"`:
+```
+gradientStops[].color → convert r/g/b (0–1) to hex
+gradientStops[].position → use directly (0–1)
+gradientHandlePositions[0] → start {x, y}
+gradientHandlePositions[1] → end {x, y}
+```
+Record as: `"gradient": { "type": "linear", "colors": ["#3870E0","#1CAAFE"], "locations": [0,1], "start": {"x":0,"y":0.5}, "end": {"x":1,"y":0.5} }`
+
 #### Handling duplicate sections:
 If two sections share the same component name — extract from ONE instance only.
 Different text/colors = different states (active vs inactive). When in doubt, ask the user.
+
+### Step 1.2.1 — Spot-check extraction map (MANDATORY)
+
+After writing the extraction map, verify 3 random values to catch `get_design_context` approximation errors:
+
+1. Pick 3 values: one padding/margin, one color, one fontSize
+2. Call `get_node(nodeId)` for the node that owns each value
+3. Compare raw response with what's in the extraction map
+
+**If difference > 1px or color differs → re-read that section via `get_design_context(childNodeId)`.**
+
+This catches cases where MCP returned rounded/truncated values in the main context call.
 
 ### Step 1.3 — Assess completeness
 
@@ -344,9 +422,12 @@ Different text/colors = different states (active vs inactive). When in doubt, as
 ### Step 1.4 — Get screenshot and save locally
 
 ```
-get_screenshot(nodeIds: ["1:23"], format: "PNG", scale: 2)
+get_screenshot(nodeIds: ["1:23"], format: "PNG", scale: 1)
 ```
 Call when simulator MCP is available or user asks for visual validation.
+
+> **scale: 1** — симулятор отдаёт logical pixels; Figma @2x = физические пиксели другого масштаба.
+> При сравнении pixel-diff скрипт ресайзит под одинаковый размер, но одинаковый масштаб сохранения даёт точнее.
 
 **Save IMMEDIATELY to permanent location:**
 ```
@@ -452,6 +533,42 @@ get_variable_defs(fileKey)
 ```
 Call ONLY if: user explicitly asks for Figma Variables sync, OR colors reference variable names instead of hex.
 
+### Step 1.6 — Design-driven library scan (MANDATORY after extraction map)
+
+Scan extraction map for non-standard UI patterns. For each detected pattern:
+1. Check if library already in `package.json`
+2. If not — web search: `"react native [pattern] library 2024 best"`
+3. Pick most maintained (GitHub stars, last commit, RN version support)
+4. Install immediately + pod install if native
+5. Document decision: why this library, what alternatives exist
+
+**Pattern detection table:**
+
+| Pattern in design | Triggers research | Popular options |
+|-------------------|-------------------|-----------------|
+| Animations (any non-trivial) | `react-native-reanimated` | already in Expo; for bare RN install + rebuild |
+| Bottom sheet / drawer | `@gorhom/bottom-sheet` | vs `react-native-bottom-sheet` |
+| Horizontal carousel / snap scroll | usually built-in FlatList | vs `react-native-snap-carousel` |
+| Charts / graphs | `victory-native` | vs `react-native-gifted-charts` vs `recharts` |
+| Map / location | `react-native-maps` | no real alternative |
+| Video player | `react-native-video` | vs `expo-video` |
+| Date / time picker | `@react-native-community/datetimepicker` | vs `react-native-date-picker` |
+| Swipeable list items | `react-native-gesture-handler` (often pre-installed) | — |
+| Skeleton / shimmer loading | `react-native-skeleton-placeholder` | vs custom Reanimated |
+| Blur overlay | `@react-native-community/blur` | vs `expo-blur` |
+| Lottie animation | `lottie-react-native` | — |
+| Onboarding / swiper screens | `react-native-onboarding-swiper` | vs FlatList paginator |
+| Progress bar / circular progress | `react-native-progress` | vs custom Reanimated |
+| Masked input | `react-native-mask-input` | — |
+| Rich text / markdown | `react-native-markdown-display` | — |
+
+**Decision rule:**
+- If a pattern can be cleanly built with standard RN primitives + Reanimated in ≤50 lines → build it
+- If it requires >50 lines or significant gesture handling → use a library
+- Always prefer libraries that are: TypeScript-native, Expo-compatible, actively maintained
+
+**After detecting and installing all libraries → rebuild the app before Phase 3.**
+
 ---
 
 ## PHASE 2 — TOKEN SYNC
@@ -501,7 +618,39 @@ Map Figma spacing values to semantic tokens using `scale()` and `vs()`.
 Map Figma corner radius values to semantic tokens using `scale()`.
 
 ### Shadows → src/theme/shadows.ts
-Extract blur, offset, color from Figma → map to nearest level (sm/md/lg/xl).
+
+Extract exact shadow values from Figma. **Do NOT map to nearest preset — use actual values.**
+
+For each shadow in the design:
+```
+get_design_context response → effects[] → type: "DROP_SHADOW" → extract:
+  blur     → figmaBlur
+  offset.x → offsetX
+  offset.y → offsetY
+  color    → convert { r, g, b } (0–1 floats) to hex: #RRGGBB
+  opacity  → from color.a OR effect's opacity field
+```
+
+**Figma → iOS conversion:**
+```
+shadowRadius = figmaBlur / 2
+```
+Figma blur = Gaussian standard deviation × 2. iOS shadowRadius = std deviation. This is the only non-obvious conversion.
+
+**Update shadowTokens in shadows.ts with real Figma values:**
+```typescript
+export const shadowTokens = {
+  card: createShadow({ blur: 20, offsetY: 8, opacity: 0.08, color: '#1B1F2A' }),
+  button: createShadow({ blur: 8,  offsetY: 4, opacity: 0.12 }),
+  modal: createShadow({ blur: 40, offsetY: 16, opacity: 0.15, color: '#000' }),
+};
+```
+
+Name tokens semantically (card, button, modal, tooltip) — NOT by size (sm/md/lg).
+
+**Multiple shadows:** Figma layers `effects` array can have multiple DROP_SHADOWs.
+RN doesn't support multiple shadows natively — use the most visually dominant one.
+For truly important stacked shadows → export the element as PNG Image.
 
 ---
 
@@ -509,20 +658,41 @@ Extract blur, offset, color from Figma → map to nearest level (sm/md/lg/xl).
 
 ### 3.0 — Image vs Programmatic decision (BEFORE coding)
 
-For EVERY section, classify before writing any code:
+**DEFAULT IS ALWAYS PROGRAMMATIC.** Only export as PNG when RN literally cannot render the effect.
 
-| Criteria | Decision |
-|----------|----------|
-| Complex decorative (concentric circles, radial layouts, illustrations) | **IMAGE** |
-| Gradient backgrounds with overlapping shapes | **IMAGE** |
-| Static branding / hero sections | **IMAGE** |
-| Custom icon compositions (icon + badge + decorative ring) | **IMAGE** |
-| >3 absolute-positioned elements, no dynamic content | **IMAGE** |
-| Interactive element with state changes | **PROGRAMMATIC** |
-| Text that varies (user name, balance, count) | **PROGRAMMATIC** |
-| List items / repeating patterns with dynamic data | **PROGRAMMATIC** |
-| Standard UI (buttons, inputs, cards with text) | **PROGRAMMATIC** |
-| Tab bar / navigation with active states | **PROGRAMMATIC** |
+#### Always PROGRAMMATIC — do NOT use PNG for these:
+
+| Pattern | How to implement |
+|---------|-----------------|
+| Linear gradient | `LinearGradient` from expo-linear-gradient |
+| Gradient button / card | `LinearGradient` as container |
+| Gradient overlay (text readability) | `LinearGradient` with `StyleSheet.absoluteFillObject` |
+| Absolute positioned elements | `position: 'absolute'`, `top/left/right/bottom` |
+| Hero section with background | `View` + `LinearGradient` or `ImageBackground` |
+| Icon + badge composition | `View` with `position: 'absolute'` badge overlay |
+| Cards with shadows | `View` + `createShadow()` |
+| Multiple overlapping Views | Use `zIndex` or natural stacking order |
+| Static branding with text | `View` + `Text` + `LinearGradient` if needed |
+| Tab bar / navigation | Always programmatic — states need to change |
+| Buttons, inputs, modals | Always programmatic |
+| List items, cards, sections | Always programmatic |
+
+#### Export as PNG — LAST RESORT, only when ALL conditions are true:
+
+1. **Purely decorative** — zero text, zero interaction, zero dynamic content
+2. **AND** contains RN-incompatible effects:
+   - Blend modes: Multiply / Screen / Overlay / Hard Light
+   - Radial gradient with complex clipping or shapes
+   - Detailed raster illustration (characters, scenes)
+   - 5+ stacked shadows that are visually critical
+3. **AND** the element will NEVER change based on state or data
+
+**Before deciding PNG — ask yourself:**
+- Does this element have text inside? → PROGRAMMATIC
+- Does this element ever change color/content? → PROGRAMMATIC
+- Is this a gradient? → LinearGradient (NEVER PNG for linear gradients)
+- Is this multiple Views overlapping? → position:absolute (NEVER PNG)
+- Could I build this in <100 lines without hacks? → PROGRAMMATIC
 
 **Composite image + touchable overlay (for interactive complex visuals):**
 ```typescript
@@ -659,7 +829,9 @@ For each component:
 | `margin-left/right` | `marginHorizontal: scale(n)` | `scale` |
 | `margin-top/bottom` | `marginVertical: vs(n)` | `vs` |
 | `font-size` | `fontSize: ms(n)` | `ms` |
-| `line-height` | `lineHeight: ms(n)` | `ms` |
+| `line-height` (px number) | `lineHeight: ms(n)` | `ms` |
+| `line-height` **Auto** | **omit lineHeight** — do NOT set | native auto |
+| `line-height` (percent, e.g. 150%) | `lineHeight: ms(Math.round(fontSize * 1.5))` | `ms` |
 | `letter-spacing` | `letterSpacing: n` | **direct — NO scale** |
 | `border-width` | `borderWidth: n` | **direct — NO scale** |
 | `border-radius` | `borderRadius: scale(n)` | `scale` |
@@ -673,6 +845,28 @@ For each component:
 | `fill container` | `flex: 1` | |
 | `hug content` | omit width/height | let content define |
 | `fixed size` | explicit `width`/`height` | |
+| `Clip content` ON | `overflow: 'hidden'` | **required for borderRadius clipping on iOS** |
+| `Clip content` OFF | omit overflow (default) | |
+
+#### Figma Constraints → React Native layout
+
+| Figma constraint | React Native equivalent |
+|-----------------|------------------------|
+| Left only | `left: scale(x)` + explicit `width` |
+| Right only | `right: scale(x)` + explicit `width` |
+| Left + Right | `left: scale(x), right: scale(x)` OR `flex: 1, marginHorizontal: scale(x)` |
+| Center horizontal | `alignSelf: 'center'` OR `left: 0, right: 0` + `alignItems: 'center'` on parent |
+| Scale (proportional) | `width: '88%'` (calculate: nodeWidth / frameWidth * 100) |
+| Top only | `top: scale(y)` |
+| Top + Bottom | `top: scale(y), bottom: scale(y)` |
+| Center vertical | `alignSelf: 'center'` inside column container |
+
+> Extract constraints from `get_design_context` → node's `constraints` field: `{ horizontal: "LEFT_RIGHT", vertical: "TOP" }`
+
+> ⚠️ **vs() scope:** Use `vs()` ONLY for fixed-height blocks that occupy a defined fraction of screen height:
+> Header, TabBar, Hero section, full-screen non-scrollable containers.
+> **Inside ScrollView/FlatList** — use `scale(n)` for vertical spacing (gap, paddingVertical, card height).
+> Using `vs()` on scrollable content stretches items on Pro Max and shrinks them on SE.
 
 ### 3.5 — Screen template
 ```typescript
@@ -689,7 +883,7 @@ export const HomeScreen: React.FC = () => {
     <View style={[styles.container, { paddingTop: insets.top }]}>
       <ScrollView
         style={styles.scroll}
-        contentContainerStyle={[styles.content, { paddingBottom: insets.bottom + vs(16) }]}
+        contentContainerStyle={[styles.content, { paddingBottom: insets.bottom + scale(16) }]}
         showsVerticalScrollIndicator={false}
       >
         {/* components */}
@@ -701,7 +895,8 @@ export const HomeScreen: React.FC = () => {
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: colors.background.primary },
   scroll: { flex: 1 },
-  content: { paddingHorizontal: scale(16), paddingTop: vs(24) },
+  content: { paddingHorizontal: scale(16), paddingTop: scale(24) },
+  // Note: scale() for ScrollView content — vs() is only for fixed-height outer blocks
 });
 ```
 
@@ -724,7 +919,7 @@ export const ListScreen: React.FC<{ data: Item[] }> = ({ data }) => {
         data={data}
         renderItem={({ item }) => <View style={styles.item} />}
         keyExtractor={(item) => item.id}
-        contentContainerStyle={[styles.listContent, { paddingBottom: insets.bottom + vs(16) }]}
+        contentContainerStyle={[styles.listContent, { paddingBottom: insets.bottom + scale(16) }]}
         showsVerticalScrollIndicator={false}
         ItemSeparatorComponent={() => <View style={styles.separator} />}
       />
@@ -734,9 +929,10 @@ export const ListScreen: React.FC<{ data: Item[] }> = ({ data }) => {
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: colors.background.primary },
-  listContent: { paddingHorizontal: scale(16), paddingTop: vs(16) },
+  listContent: { paddingHorizontal: scale(16), paddingTop: scale(16) },
   item: { /* match Figma card design */ },
-  separator: { height: vs(12) },
+  separator: { height: scale(12) },
+  // Note: scale() for FlatList content spacing — vs() is only for fixed-height outer blocks
 });
 ```
 
@@ -846,13 +1042,22 @@ const styles = StyleSheet.create({
 
 ### 3.9 — Shadow pattern
 ```typescript
-import { getShadow } from '@/theme/shadows';
+import { getShadow, createShadow } from '@/theme/shadows';
 
+// Use preset token (defined in shadows.ts during Phase 2):
 card: {
-  ...getShadow('md'),
+  ...getShadow('card'),
   backgroundColor: colors.background.primary, // REQUIRED — shadows need background
 }
+
+// One-off shadow (if this shadow doesn't repeat elsewhere):
+specialCard: {
+  ...createShadow({ blur: 24, offsetY: 10, opacity: 0.10, color: '#1B1F2A' }),
+  backgroundColor: colors.background.primary,
+}
 ```
+
+**Conversion reminder:** `shadowRadius = figmaBlur / 2` — already applied inside `createShadow`.
 
 ### 3.10 — Font pattern
 ```typescript
@@ -891,6 +1096,60 @@ import HomeSvg from '@/assets/icons/icon-home.svg';
 ```
 
 **NEVER use Figma URLs — always locally saved assets via `require()`.**
+
+### 3.12 — overflow: hidden
+
+iOS does NOT clip children at `borderRadius` without `overflow: 'hidden'`. Always add it when:
+- View has `borderRadius` AND children that must be clipped (images, gradients, inner content)
+- `LinearGradient` has `borderRadius`
+- `Image` is inside a rounded View and must fill it
+
+```typescript
+// ❌ iOS shows square corners for the image despite borderRadius on container
+card: { borderRadius: scale(16), backgroundColor: colors.background.primary }
+
+// ✅ Children are clipped correctly
+card: { borderRadius: scale(16), overflow: 'hidden', backgroundColor: colors.background.primary }
+
+// ✅ LinearGradient with borderRadius
+<LinearGradient
+  colors={['#3870E0', '#1CAAFE']}
+  style={{ borderRadius: scale(12), overflow: 'hidden', padding: scale(16) }}
+>
+  <Text style={styles.label}>Button</Text>
+</LinearGradient>
+```
+
+> Figma "Clip content" = ON → add `overflow: 'hidden'`
+> Any borderRadius on a View that contains Image/Gradient → add `overflow: 'hidden'`
+
+### 3.13 — Mixed inline text styles (partial bold, colored word)
+
+Figma allows different styles on parts of a text node (e.g., bold word in a sentence, colored price in a label). RN handles this with nested `<Text>` components — NOT with a single Text + StyleSheet.
+
+```typescript
+// Figma: "Pay {bold}$99{/bold} today"
+<Text style={styles.body}>
+  Pay{' '}
+  <Text style={styles.price}>$99</Text>
+  {' '}today
+</Text>
+
+// Figma: "Welcome back, {colored}John{/colored}"
+<Text style={styles.greeting}>
+  Welcome back,{' '}
+  <Text style={styles.name}>John</Text>
+</Text>
+
+const styles = StyleSheet.create({
+  body:     { ...typography.body1, color: colors.text.primary },
+  price:    { ...typography.body1, fontWeight: '700', color: colors.primary.default },
+  greeting: { ...typography.h3, color: colors.text.primary },
+  name:     { ...typography.h3, color: colors.primary.default },
+});
+```
+
+Detection: in `get_design_context`, a TEXT node with `characterStyleOverrides` or multiple style entries → use nested Text.
 
 ---
 
@@ -947,6 +1206,8 @@ For each emoji: is it present in the Figma TEXT node?
 
 - [ ] Every screen uses `useSafeAreaInsets()` — no hardcoded notch offset
 - [ ] Every shadow has `backgroundColor` on the same View
+- [ ] Views with borderRadius + children (images, gradients) have `overflow: 'hidden'`
+- [ ] Figma "Clip content" ON → `overflow: 'hidden'` in code
 - [ ] Every font uses `Platform.select` or `typography.*` spread
 - [ ] Zero hex colors in StyleSheet (only `colors.*` tokens)
 - [ ] Zero bare numbers (only `scale/vs/ms()` + exceptions: letterSpacing, borderWidth, opacity)
@@ -1030,16 +1291,31 @@ Navigate to the implemented screen, then take a screenshot. Save to `/tmp/{Scree
 
 ### 5.4 — Visual comparison
 
-Read BOTH images and compare area by area:
-1. `src/assets/figma/{ScreenName}_design.png` — Figma reference (local)
-2. `/tmp/{ScreenName}_sim_{N}.png` — simulator screenshot
+**Step 1 — Objective pixel diff (MANDATORY, run first):**
+
+```bash
+pip3 install Pillow numpy -q 2>/dev/null
+SKILL_DIR=$(find ~/.claude/skills -name "pixel-diff.py" 2>/dev/null | head -1)
+python3 "$SKILL_DIR" \
+  src/assets/figma/{ScreenName}_design.png \
+  /tmp/{ScreenName}_sim_{N}.png \
+  /tmp/{ScreenName}_diff_{N}.png
+```
+
+Script outputs exact `Match: XX.X%`. Exit code 0 = ≥95%, exit code 1 = needs fixes.
+Open the diff image: white = matches, bright/colored = discrepancy. See `references/pixel-diff.md` for interpretation.
+
+**% match comes from the script output — NOT from visual AI estimation.**
+
+**Step 2 — Area-by-area breakdown (fill after viewing diff image):**
+
+Read BOTH images and annotate discrepancies. The diff image shows WHERE to look.
 
 ```
 VISUAL COMPARISON: {ScreenName} — Iteration {N}
 ┌──────────────────────┬────────┬────────────────────────────────────┐
 │ Area                 │ Match  │ Discrepancy                        │
 ├──────────────────────┼────────┼────────────────────────────────────┤
-│ Status bar area      │ ✓ / ✗  │                                    │
 │ Header / NavBar      │ ✓ / ✗  │ e.g., "title 2px too low"          │
 │ Section 1            │ ✓ / ✗  │                                    │
 │ Section 2            │ ✓ / ✗  │                                    │
@@ -1049,10 +1325,10 @@ VISUAL COMPARISON: {ScreenName} — Iteration {N}
 │ Typography           │ ✓ / ✗  │                                    │
 │ Spacing / gaps       │ ✓ / ✗  │                                    │
 │ Border radius        │ ✓ / ✗  │                                    │
-│ Shadows / elevation  │ ✓ / ✗  │                                    │
+│ Shadows / elevation  │ ✓ / ✗  │ (see acceptable diffs in platform-patterns.md) │
 │ Bottom / Footer      │ ✓ / ✗  │                                    │
 ├──────────────────────┼────────┼────────────────────────────────────┤
-│ MATCH ESTIMATE       │  ___%  │                                    │
+│ MATCH (from script)  │  ___%  │                                    │
 └──────────────────────┴────────┴────────────────────────────────────┘
 ```
 

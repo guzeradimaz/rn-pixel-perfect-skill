@@ -188,3 +188,28 @@ flex              → число (прямое значение)
 aspectRatio       → число (прямое значение)
 transform scale   → число (прямое значение)
 ```
+
+## vs() — только для fixed-layout блоков
+
+`vs()` привязан к высоте экрана — он уместен только когда элемент занимает фиксированную долю высоты экрана.
+
+```
+✅ vs() → Header, NavigationBar, TabBar, Hero section, полноэкранные контейнеры
+✅ vs() → top/bottom позиция в absolute-positioned overlay
+❌ НЕ vs() → gap между карточками в ScrollView/FlatList → scale(n)
+❌ НЕ vs() → paddingVertical внутри карточки → scale(n)
+❌ НЕ vs() → отступы между секциями в ScrollView → scale(n)
+❌ НЕ vs() → высота карточки в списке → vs() растянет её на Pro Max, сожмёт на SE
+```
+
+Правило: если элемент находится внутри ScrollView или FlatList — его вертикальные размеры не должны зависеть от высоты экрана.
+
+## lineHeight из Figma
+
+```
+Figma "Auto" / не задан  →  НЕ устанавливать lineHeight в RN (undefined = native auto)
+Figma N (число px)       →  lineHeight: ms(N)
+Figma "150%" / процент   →  lineHeight: ms(Math.round(fontSize * 1.5))
+```
+
+Ошибка: брать computed value из Figma (например 19.2 для 16px при Auto) и оборачивать в `ms(19.2)` — это ломает вертикальное выравнивание текста на iOS.
